@@ -27,26 +27,26 @@ func NewEventsHandler(db *gorm.DB, jwtSecret string, participantService *service
 }
 
 type CreateEventRequest struct {
-	Title              string   `json:"title"`
-	Description        string   `json:"description"`
-	Location           string   `json:"location"`
-	DurationMinutes    int      `json:"duration_minutes"`
-	TimeFrameStart     string   `json:"time_frame_start"` // ISO8601
-	TimeFrameEnd       string   `json:"time_frame_end"`   // ISO8601
-	ParticipantEmails  []string `json:"participant_emails"`
+	Title             string   `json:"title"`
+	Description       string   `json:"description"`
+	Location          string   `json:"location"`
+	DurationMinutes   int      `json:"duration_minutes"`
+	TimeFrameStart    string   `json:"time_frame_start"` // ISO8601
+	TimeFrameEnd      string   `json:"time_frame_end"`   // ISO8601
+	ParticipantEmails []string `json:"participant_emails"`
 }
 
 type EventResponse struct {
-	ID               uint    `json:"id"`
-	CreatorID        uint    `json:"creator_id"`
-	Title            string  `json:"title"`
-	Description      string  `json:"description"`
-	Location         string  `json:"location"`
-	DurationMinutes  int     `json:"duration_minutes"`
-	TimeFrameStart   *string `json:"time_frame_start,omitempty"`
-	TimeFrameEnd     *string `json:"time_frame_end,omitempty"`
-	ShareLink        string  `json:"share_link"`
-	CreatedAt        string  `json:"created_at"`
+	ID              uint    `json:"id"`
+	CreatorID       uint    `json:"creator_id"`
+	Title           string  `json:"title"`
+	Description     string  `json:"description"`
+	Location        string  `json:"location"`
+	DurationMinutes int     `json:"duration_minutes"`
+	TimeFrameStart  *string `json:"time_frame_start,omitempty"`
+	TimeFrameEnd    *string `json:"time_frame_end,omitempty"`
+	ShareLink       string  `json:"share_link"`
+	CreatedAt       string  `json:"created_at"`
 }
 
 // CreateEvent: parse JWT → create Event + Invitation → add Participants → (optionally) SendInvite via EmailSender.
@@ -161,6 +161,7 @@ func (h *EventsHandler) ListEvents(c *fiber.Ctx) error {
 }
 
 // UpdateEvent: organizer only. Supports partial update (title, description, participants, etc.).
+// Only updates the existing event in place; never creates a new event.
 func (h *EventsHandler) UpdateEvent(c *fiber.Ctx) error {
 	userID, err := getUserIDFromContext(c, h.jwtSecret)
 	if err != nil {
@@ -184,13 +185,13 @@ func (h *EventsHandler) UpdateEvent(c *fiber.Ctx) error {
 	}
 
 	var req struct {
-		Title              *string  `json:"title"`
-		Description        *string  `json:"description"`
-		Location           *string  `json:"location"`
-		DurationMinutes    *int     `json:"duration_minutes"`
-		TimeFrameStart     *string  `json:"time_frame_start"`
-		TimeFrameEnd       *string  `json:"time_frame_end"`
-		ParticipantEmails  []string `json:"participant_emails"`
+		Title             *string  `json:"title"`
+		Description       *string  `json:"description"`
+		Location          *string  `json:"location"`
+		DurationMinutes   *int     `json:"duration_minutes"`
+		TimeFrameStart    *string  `json:"time_frame_start"`
+		TimeFrameEnd      *string  `json:"time_frame_end"`
+		ParticipantEmails []string `json:"participant_emails"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
@@ -240,7 +241,7 @@ func (h *EventsHandler) UpdateEvent(c *fiber.Ctx) error {
 	return c.JSON(toEventResponse(&event, token))
 }
 
-// GetParticipantStatus: organizer only. Returns participants, responded_count, percent_responded.
+// GetParticipantStatus: organizer only. Returns participants with their submitted slots, responded_count, percent_responded.
 func (h *EventsHandler) GetParticipantStatus(c *fiber.Ctx) error {
 	userID, err := getUserIDFromContext(c, h.jwtSecret)
 	if err != nil {
@@ -264,29 +265,29 @@ func (h *EventsHandler) GetParticipantStatus(c *fiber.Ctx) error {
 	}
 
 	if h.participantService == nil {
-		return c.JSON(fiber.Map{"participants": []interface{}{}})
+		return c.JSON(fiber.Map{"participants": []interface{}{}, "responded_count": 0, "total_count": 0, "percent_responded": 0})
 	}
-	status, err := h.participantService.GetParticipantStatus(uint(id))
+	withSlots, err := h.participantService.GetParticipantStatusWithSlots(uint(id))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 
 	responded := 0
-	for _, p := range status {
+	for _, p := range withSlots {
 		if p.Responded {
 			responded++
 		}
 	}
-	total := len(status)
+	total := len(withSlots)
 	percent := 0
 	if total > 0 {
 		percent = (responded * 100) / total
 	}
 	return c.JSON(fiber.Map{
-		"participants":        status,
-		"responded_count":     responded,
-		"total_count":         total,
-		"percent_responded":   percent,
+		"participants":      withSlots,
+		"responded_count":   responded,
+		"total_count":       total,
+		"percent_responded": percent,
 	})
 }
 

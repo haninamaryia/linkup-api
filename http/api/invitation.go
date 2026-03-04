@@ -107,10 +107,20 @@ func (h *InvitationHandler) SubmitAvailability(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "slot_end must be after slot_start"})
 	}
 
+	var participantID *uint
+	if req.Email != "" {
+		participant, err := h.participantService.FindOrCreateParticipant(eventID, req.Email)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+		participantID = &participant.ID
+	}
+
 	avail := models.Availability{
-		EventID:   eventID,
-		SlotStart: slotStart,
-		SlotEnd:   slotEnd,
+		EventID:       eventID,
+		ParticipantID: participantID,
+		SlotStart:     slotStart,
+		SlotEnd:       slotEnd,
 	}
 	if err := h.db.Create(&avail).Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})

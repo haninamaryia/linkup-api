@@ -332,4 +332,77 @@ func TestParticipantStatus(t *testing.T) {
 	if out["total_count"].(float64) != 2 {
 		t.Fatalf("expected 2 participants, got %v", out["total_count"])
 	}
+	participants := out["participants"].([]interface{})
+	if len(participants) != 2 {
+		t.Fatalf("expected 2 participants in list, got %d", len(participants))
+	}
+	for i, p := range participants {
+		pm := p.(map[string]interface{})
+		if _, ok := pm["slots"]; !ok {
+			t.Fatalf("participant %d missing slots key", i)
+		}
+	}
+}
+
+func TestParticipantStatusWithSlots(t *testing.T) {
+	app, _, authService, _ := setupTestApp(t)
+	token := getJWT(t, app, authService)
+
+	createBody, _ := json.Marshal(map[string]interface{}{
+		"title":              "Event",
+		"duration_minutes":   30,
+		"participant_emails": []string{"p@test.com"},
+	})
+	req := httptest.NewRequest("POST", "/events", bytes.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, _ := app.Test(req)
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create: status=%d body=%s", resp.StatusCode, string(b))
+	}
+	var createOut map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&createOut)
+	shareLink := createOut["share_link"].(string)
+	tokenStr := shareLink[len("/inv/"):]
+	eventID := int(createOut["id"].(float64))
+
+	availBody, _ := json.Marshal(map[string]string{
+		"email":      "p@test.com",
+		"slot_start": "2025-03-01T10:00:00Z",
+		"slot_end":   "2025-03-01T11:00:00Z",
+	})
+	req2 := httptest.NewRequest("POST", "/inv/"+tokenStr+"/availability", bytes.NewReader(availBody))
+	req2.Header.Set("Content-Type", "application/json")
+	resp2, _ := app.Test(req2)
+	if resp2.StatusCode != 201 {
+		b, _ := io.ReadAll(resp2.Body)
+		t.Fatalf("submit availability: status=%d body=%s", resp2.StatusCode, string(b))
+	}
+
+	req3 := httptest.NewRequest("GET", fmt.Sprintf("/events/%d/participant-status", eventID), nil)
+	req3.Header.Set("Authorization", "Bearer "+token)
+	resp3, _ := app.Test(req3)
+	if resp3.StatusCode != 200 {
+		b, _ := io.ReadAll(resp3.Body)
+		t.Fatalf("participant-status: status=%d body=%s", resp3.StatusCode, string(b))
+	}
+	var out map[string]interface{}
+	json.NewDecoder(resp3.Body).Decode(&out)
+	participants := out["participants"].([]interface{})
+	if len(participants) != 1 {
+		t.Fatalf("expected 1 participant, got %d", len(participants))
+	}
+	p := participants[0].(map[string]interface{})
+	if p["email"] != "p@test.com" {
+		t.Fatalf("expected email p@test.com, got %v", p["email"])
+	}
+	slots := p["slots"].([]interface{})
+	if len(slots) != 1 {
+		t.Fatalf("expected 1 slot for participant, got %d", len(slots))
+	}
+	slot := slots[0].(map[string]interface{})
+	if slot["slot_start"].(string) != "2025-03-01T10:00:00Z" || slot["slot_end"].(string) != "2025-03-01T11:00:00Z" {
+		t.Fatalf("unexpected slot: %v", slot)
+	}
 }

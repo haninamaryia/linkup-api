@@ -19,7 +19,7 @@ func (c *Config) GetDatabaseURL() string {
 // Load reads env vars (SERVER_ADDRESS, DATABASE_URL, JWT_SECRET) with defaults.
 func Load() *Config {
 	return &Config{
-		ServerAddress: getEnv("SERVER_ADDRESS", ":8080"),
+		ServerAddress: getEnv("SERVER_ADDRESS", ":8181"),
 		DatabaseURL:   getEnv("DATABASE_URL", "linkup.db"),
 		JwtSecret:     getEnv("JWT_SECRET", "dev-secret"),
 	}

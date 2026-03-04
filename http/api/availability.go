@@ -85,48 +85,59 @@ func (h *AvailabilityHandler) SubmitAvailability(c *fiber.Ctx) error {
 	})
 }
 
-// GetBestTimes: all overlapping slots within event time frame.
+// GetBestTimes: all overlapping slots within event time frame (30-min step). Optionally includes note and excluded_participant_ids when not all participants can be included.
 func (h *AvailabilityHandler) GetBestTimes(c *fiber.Ctx) error {
 	eventID, err := c.ParamsInt("id")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid event id"})
 	}
 
-	results, err := h.schedulingService.GetBestTimes(uint(eventID), 0)
+	resp, err := h.schedulingService.GetBestTimesResponse(uint(eventID), 0)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	if len(results) == 0 {
-		return c.JSON(fiber.Map{"best_times": []interface{}{}, "message": "no overlapping availability found"})
+	if len(resp.Slots) == 0 {
+		out := fiber.Map{"best_times": []interface{}{}, "message": "no overlapping availability found"}
+		if resp.Note != "" {
+			out["note"] = resp.Note
+			out["excluded_participant_ids"] = resp.ExcludedParticipantIDs
+		}
+		return c.JSON(out)
 	}
 
-	slots := make([]BestTimeResponse, len(results))
-	for i, r := range results {
+	slots := make([]BestTimeResponse, len(resp.Slots))
+	for i, r := range resp.Slots {
 		slots[i] = BestTimeResponse{
 			SlotStart: r.SlotStart.Format("2006-01-02T15:04:05Z07:00"),
 			SlotEnd:   r.SlotEnd.Format("2006-01-02T15:04:05Z07:00"),
 		}
 	}
-	return c.JSON(fiber.Map{"best_times": slots})
+	out := fiber.Map{"best_times": slots}
+	if resp.Note != "" {
+		out["note"] = resp.Note
+		out["excluded_participant_ids"] = resp.ExcludedParticipantIDs
+	}
+	return c.JSON(out)
 }
 
-// GetBestTime: first overlapping slot (backwards compat).
+// GetBestTime: first overlapping slot (same logic as best-times, returns first only).
 func (h *AvailabilityHandler) GetBestTime(c *fiber.Ctx) error {
 	eventID, err := c.ParamsInt("id")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid event id"})
 	}
 
-	result, err := h.schedulingService.GetBestTime(uint(eventID), 0)
+	resp, err := h.schedulingService.GetBestTimesResponse(uint(eventID), 0)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	if result == nil {
+	if len(resp.Slots) == 0 {
 		return c.JSON(fiber.Map{"message": "no overlapping availability found"})
 	}
 
+	r := resp.Slots[0]
 	return c.JSON(BestTimeResponse{
-		SlotStart: result.SlotStart.Format("2006-01-02T15:04:05Z07:00"),
-		SlotEnd:   result.SlotEnd.Format("2006-01-02T15:04:05Z07:00"),
+		SlotStart: r.SlotStart.Format("2006-01-02T15:04:05Z07:00"),
+		SlotEnd:   r.SlotEnd.Format("2006-01-02T15:04:05Z07:00"),
 	})
 }
