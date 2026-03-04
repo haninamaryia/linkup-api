@@ -1,4 +1,5 @@
 # Binaries
+linkup-api
 *.exe
 *.exe~
 *.dll

@@ -1,4 +1,4 @@
-package handlers
+package api
 
 import (
 	"bytes"
@@ -13,9 +13,9 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
-	"linkup-backend/internal/models"
-	"linkup-backend/internal/services"
-	"linkup-backend/internal/utils"
+	"linkup-backend/models"
+	"linkup-backend/services"
+	"linkup-backend/utils"
 )
 
 func mustParseTime(s string) time.Time {

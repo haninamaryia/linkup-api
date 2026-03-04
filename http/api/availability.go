@@ -1,14 +1,14 @@
 // AvailabilityHandler: submit availability, get best time(s).
 // POST /events/:id/availability (can be used with or without auth).
 // GET /events/:id/best-time (first overlapping slot), GET /events/:id/best-times (all slots).
-package handlers
+package api
 
 import (
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
 
-	"linkup-backend/internal/models"
-	"linkup-backend/internal/services"
+	"linkup-backend/models"
+	"linkup-backend/services"
 )
 
 type AvailabilityHandler struct {

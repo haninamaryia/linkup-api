@@ -1,11 +1,11 @@
-// Package handlers contains HTTP handlers for the Linkup API.
-package handlers
+// Package api contains HTTP handlers for the Linkup API.
+package api
 
 import (
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
 
-	"linkup-backend/internal/services"
+	"linkup-backend/services"
 )
 
 // SetupRoutes wires all API routes to handlers.

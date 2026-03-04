@@ -1,14 +1,14 @@
 // InvitationHandler: participant flow (no auth).
 // GET /inv/:token → event details for share link. POST /inv/:token/availability → submit slots.
 // If email is provided in POST body, participant is marked as responded.
-package handlers
+package api
 
 import (
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
 
-	"linkup-backend/internal/models"
-	"linkup-backend/internal/services"
+	"linkup-backend/models"
+	"linkup-backend/services"
 )
 
 type InvitationHandler struct {

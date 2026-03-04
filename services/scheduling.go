@@ -5,7 +5,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"linkup-backend/internal/models"
+	"linkup-backend/models"
 )
 
 // SchedulingService computes overlapping availability slots for best meeting times.

@@ -7,7 +7,7 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
-	"linkup-backend/internal/models"
+	"linkup-backend/models"
 )
 
 // DBConfig is implemented by config.Config so database stays decoupled.

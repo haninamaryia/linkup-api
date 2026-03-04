@@ -7,9 +7,9 @@ import (
 	"log"
 
 	"github.com/gofiber/fiber/v2"
-	"linkup-backend/internal/config"
-	"linkup-backend/internal/database"
-	"linkup-backend/internal/handlers"
+	"linkup-backend/config"
+	"linkup-backend/database"
+	"linkup-backend/http/api"
 )
 
 func main() {
@@ -23,7 +23,7 @@ func main() {
 	app := fiber.New()
 
 	// 4. Wire handlers to routes (auth, events, availability, invitations)
-	handlers.SetupRoutes(app, db, cfg.JwtSecret)
+	api.SetupRoutes(app, db, cfg.JwtSecret)
 
 	// 5. Start HTTP server
 	log.Println("API running on", cfg.ServerAddress)

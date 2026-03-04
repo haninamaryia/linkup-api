@@ -1,6 +1,6 @@
 // EventsHandler: organizer CRUD for events. All except GetEvent require JWT (creator only for update/delete).
 // CreateEvent also creates Invitation, adds Participants, and triggers email invites (stub).
-package handlers
+package api
 
 import (
 	"crypto/rand"
@@ -10,9 +10,9 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
 
-	"linkup-backend/internal/models"
-	"linkup-backend/internal/services"
-	"linkup-backend/internal/utils"
+	"linkup-backend/models"
+	"linkup-backend/services"
+	"linkup-backend/utils"
 )
 
 type EventsHandler struct {

@@ -3,7 +3,7 @@ package services
 import (
 	"gorm.io/gorm"
 
-	"linkup-backend/internal/models"
+	"linkup-backend/models"
 )
 
 // InvitationService resolves invitation tokens to events (participant flow).

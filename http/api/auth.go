@@ -1,13 +1,13 @@
 // AuthHandler: POST /auth/request-code, POST /auth/verify-code.
 // Flow: RequestCode → AuthService stores code in memory, logs to stdout in dev.
 //       VerifyCode → AuthService validates, returns userID/email → handler issues JWT.
-package handlers
+package api
 
 import (
 	"github.com/gofiber/fiber/v2"
 
-	"linkup-backend/internal/services"
-	"linkup-backend/internal/utils"
+	"linkup-backend/services"
+	"linkup-backend/utils"
 )
 
 type AuthHandler struct {

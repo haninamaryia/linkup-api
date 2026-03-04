@@ -8,7 +8,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"linkup-backend/internal/models"
+	"linkup-backend/models"
 )
 
 // AuthService handles email+code auth (no passwords). RequestCode creates/finds user and stores
