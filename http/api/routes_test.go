@@ -42,7 +42,7 @@ func setupTestApp(t *testing.T) (*fiber.App, *gorm.DB, *services.AuthService, st
 	emailSender := services.NewStubEmailSender()
 
 	authHandler := NewAuthHandler(authService, jwtSecret)
-	eventsHandler := NewEventsHandler(db, jwtSecret, participantService, emailSender)
+	eventsHandler := NewEventsHandler(db, jwtSecret, participantService, emailSender, schedulingService)
 	availHandler := NewAvailabilityHandler(db, schedulingService)
 	invHandler := NewInvitationHandler(invitationService, participantService, db)
 
@@ -55,6 +55,7 @@ func setupTestApp(t *testing.T) (*fiber.App, *gorm.DB, *services.AuthService, st
 	app.Patch("/events/:id", eventsHandler.UpdateEvent)
 	app.Delete("/events/:id", eventsHandler.DeleteEvent)
 	app.Get("/events/:id/participant-status", eventsHandler.GetParticipantStatus)
+	app.Get("/events/:id/summary", eventsHandler.GetEventSummary)
 	app.Post("/events/:id/availability", availHandler.SubmitAvailability)
 	app.Get("/events/:id/best-time", availHandler.GetBestTime)
 	app.Get("/events/:id/best-times", availHandler.GetBestTimes)
@@ -404,5 +405,53 @@ func TestParticipantStatusWithSlots(t *testing.T) {
 	slot := slots[0].(map[string]interface{})
 	if slot["slot_start"].(string) != "2025-03-01T10:00:00Z" || slot["slot_end"].(string) != "2025-03-01T11:00:00Z" {
 		t.Fatalf("unexpected slot: %v", slot)
+	}
+}
+
+func TestEventSummary(t *testing.T) {
+	app, _, authService, _ := setupTestApp(t)
+	token := getJWT(t, app, authService)
+
+	createBody, _ := json.Marshal(map[string]interface{}{
+		"title":              "Summary Event",
+		"duration_minutes":   30,
+		"participant_emails": []string{"a@test.com", "b@test.com"},
+	})
+	req := httptest.NewRequest("POST", "/events", bytes.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, _ := app.Test(req)
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create: status=%d body=%s", resp.StatusCode, string(b))
+	}
+	var createOut map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&createOut)
+	eventID := int(createOut["id"].(float64))
+
+	req2 := httptest.NewRequest("GET", fmt.Sprintf("/events/%d/summary", eventID), nil)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	resp2, _ := app.Test(req2)
+	if resp2.StatusCode != 200 {
+		b, _ := io.ReadAll(resp2.Body)
+		t.Fatalf("summary: status=%d body=%s", resp2.StatusCode, string(b))
+	}
+	var out map[string]interface{}
+	json.NewDecoder(resp2.Body).Decode(&out)
+	if _, ok := out["event"]; !ok {
+		t.Fatalf("summary missing event")
+	}
+	if _, ok := out["participants"]; !ok {
+		t.Fatalf("summary missing participants")
+	}
+	if _, ok := out["best_times"]; !ok {
+		t.Fatalf("summary missing best_times")
+	}
+	if out["total_count"].(float64) != 2 {
+		t.Fatalf("expected total_count 2, got %v", out["total_count"])
+	}
+	participants := out["participants"].([]interface{})
+	if len(participants) != 2 {
+		t.Fatalf("expected 2 participants, got %d", len(participants))
 	}
 }

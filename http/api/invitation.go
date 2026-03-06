@@ -4,6 +4,8 @@
 package api
 
 import (
+	"fmt"
+
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
 
@@ -56,23 +58,31 @@ func (h *InvitationHandler) GetByToken(c *fiber.Ctx) error {
 		OrganizerName:   creator.Name,
 	}
 	if event.TimeFrameStart != nil {
-		s := event.TimeFrameStart.Format("2006-01-02T15:04:05Z07:00")
+		s := event.TimeFrameStart.Format(timeFormatISO8601)
 		resp.TimeFrameStart = &s
 	}
 	if event.TimeFrameEnd != nil {
-		s := event.TimeFrameEnd.Format("2006-01-02T15:04:05Z07:00")
+		s := event.TimeFrameEnd.Format(timeFormatISO8601)
 		resp.TimeFrameEnd = &s
 	}
 	return c.JSON(resp)
 }
 
 type InvSubmitAvailabilityRequest struct {
-	Email     string `json:"email"`      // optional, to mark participant as responded
+	Email     string       `json:"email"`      // optional; when set, participant is identified and existing slots are replaced
+	SlotStart string       `json:"slot_start"` // required if slots not provided
+	SlotEnd   string       `json:"slot_end"`   // required if slots not provided
+	Slots     []InvSlot    `json:"slots"`     // optional; if present, replace participant's availability with this set (email required)
+}
+
+type InvSlot struct {
 	SlotStart string `json:"slot_start"`
 	SlotEnd   string `json:"slot_end"`
 }
 
-// SubmitAvailability: create Availability, optionally mark participant responded if email matches.
+// SubmitAvailability: create or replace availability for the participant.
+// When email is provided: deletes existing slots for that participant for this event, then inserts the new one(s).
+// Single slot: use slot_start/slot_end. Multiple (or replace-with-none): use slots array.
 func (h *InvitationHandler) SubmitAvailability(c *fiber.Ctx) error {
 	token := c.Params("token")
 	if token == "" {
@@ -91,20 +101,46 @@ func (h *InvitationHandler) SubmitAvailability(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
 	}
-	if req.SlotStart == "" || req.SlotEnd == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "slot_start and slot_end required"})
-	}
 
-	slotStart, err := parseISO8601(req.SlotStart)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid slot_start format"})
-	}
-	slotEnd, err := parseISO8601(req.SlotEnd)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid slot_end format"})
-	}
-	if !slotEnd.After(slotStart) {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "slot_end must be after slot_start"})
+	// Decide payload: slots array vs single slot
+	var toInsert []struct{ start, end string }
+	if len(req.Slots) > 0 {
+		if req.Email == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "email required when using slots array"})
+		}
+		for i, s := range req.Slots {
+			if s.SlotStart == "" || s.SlotEnd == "" {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "slot_start and slot_end required in each slot"})
+			}
+			start, err := parseISO8601(s.SlotStart)
+			if err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("invalid slot_start in slot %d", i+1)})
+			}
+			end, err := parseISO8601(s.SlotEnd)
+			if err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("invalid slot_end in slot %d", i+1)})
+			}
+			if !end.After(start) {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("slot_end must be after slot_start in slot %d", i+1)})
+			}
+			toInsert = append(toInsert, struct{ start, end string }{s.SlotStart, s.SlotEnd})
+		}
+	} else {
+		if req.SlotStart == "" || req.SlotEnd == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "slot_start and slot_end required"})
+		}
+		slotStart, err := parseISO8601(req.SlotStart)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid slot_start format"})
+		}
+		slotEnd, err := parseISO8601(req.SlotEnd)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid slot_end format"})
+		}
+		if !slotEnd.After(slotStart) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "slot_end must be after slot_start"})
+		}
+		toInsert = append(toInsert, struct{ start, end string }{req.SlotStart, req.SlotEnd})
 	}
 
 	var participantID *uint
@@ -114,24 +150,40 @@ func (h *InvitationHandler) SubmitAvailability(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 		}
 		participantID = &participant.ID
+		// Replace-on-submit: remove existing slots for this participant for this event
+		h.db.Where("event_id = ? AND participant_id = ?", eventID, participant.ID).Delete(&models.Availability{})
 	}
 
-	avail := models.Availability{
-		EventID:       eventID,
-		ParticipantID: participantID,
-		SlotStart:     slotStart,
-		SlotEnd:       slotEnd,
-	}
-	if err := h.db.Create(&avail).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	var created []uint
+	for _, s := range toInsert {
+		start, _ := parseISO8601(s.start)
+		end, _ := parseISO8601(s.end)
+		avail := models.Availability{
+			EventID:       eventID,
+			ParticipantID: participantID,
+			SlotStart:     start,
+			SlotEnd:       end,
+		}
+		if err := h.db.Create(&avail).Error; err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+		created = append(created, avail.ID)
 	}
 
 	if req.Email != "" {
 		_ = h.participantService.MarkRespondedByEmail(eventID, req.Email)
 	}
 
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"message": "availability submitted",
-		"id":      avail.ID,
-	})
+	msg := "availability submitted"
+	if req.Email != "" {
+		msg = "availability replaced" // we always delete existing then insert when email is present
+	}
+	out := fiber.Map{"message": msg}
+	if len(created) == 1 {
+		out["id"] = created[0]
+	}
+	if len(created) > 1 {
+		out["ids"] = created
+	}
+	return c.Status(fiber.StatusCreated).JSON(out)
 }

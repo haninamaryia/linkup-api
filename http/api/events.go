@@ -20,10 +20,11 @@ type EventsHandler struct {
 	jwtSecret          string
 	participantService *services.ParticipantService
 	emailSender        services.EmailSender
+	schedulingService  *services.SchedulingService
 }
 
-func NewEventsHandler(db *gorm.DB, jwtSecret string, participantService *services.ParticipantService, emailSender services.EmailSender) *EventsHandler {
-	return &EventsHandler{db: db, jwtSecret: jwtSecret, participantService: participantService, emailSender: emailSender}
+func NewEventsHandler(db *gorm.DB, jwtSecret string, participantService *services.ParticipantService, emailSender services.EmailSender, schedulingService *services.SchedulingService) *EventsHandler {
+	return &EventsHandler{db: db, jwtSecret: jwtSecret, participantService: participantService, emailSender: emailSender, schedulingService: schedulingService}
 }
 
 type CreateEventRequest struct {
@@ -128,12 +129,8 @@ func (h *EventsHandler) GetEvent(c *fiber.Ctx) error {
 		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-
-	var inv models.Invitation
-	if err := h.db.Where("event_id = ?", event.ID).First(&inv).Error; err == nil {
-		return c.JSON(toEventResponse(&event, inv.Token))
-	}
-	return c.JSON(toEventResponse(&event, ""))
+	token := h.getInvitationToken(event.ID)
+	return c.JSON(toEventResponse(&event, token))
 }
 
 // ListEvents: organizer's events only (from JWT creator_id).
@@ -150,11 +147,7 @@ func (h *EventsHandler) ListEvents(c *fiber.Ctx) error {
 
 	result := make([]EventResponse, len(events))
 	for i := range events {
-		var inv models.Invitation
-		token := ""
-		if err := h.db.Where("event_id = ?", events[i].ID).First(&inv).Error; err == nil {
-			token = inv.Token
-		}
+		token := h.getInvitationToken(events[i].ID)
 		result[i] = toEventResponse(&events[i], token)
 	}
 	return c.JSON(result)
@@ -163,25 +156,9 @@ func (h *EventsHandler) ListEvents(c *fiber.Ctx) error {
 // UpdateEvent: organizer only. Supports partial update (title, description, participants, etc.).
 // Only updates the existing event in place; never creates a new event.
 func (h *EventsHandler) UpdateEvent(c *fiber.Ctx) error {
-	userID, err := getUserIDFromContext(c, h.jwtSecret)
-	if err != nil {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
-	}
-
-	id, err := c.ParamsInt("id")
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid event id"})
-	}
-
-	var event models.Event
-	if err := h.db.First(&event, id).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "event not found"})
-		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-	}
-	if event.CreatorID != userID {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not event creator"})
+	event, id, ok := h.getEventForOrganizer(c)
+	if !ok {
+		return nil
 	}
 
 	var req struct {
@@ -226,101 +203,162 @@ func (h *EventsHandler) UpdateEvent(c *fiber.Ctx) error {
 		}
 	}
 	if req.ParticipantEmails != nil && h.participantService != nil {
-		// TODO: Regenerate invites / resend emails when participants change
-		// Replace participants - delete existing and add new (simple approach)
 		h.db.Where("event_id = ?", event.ID).Delete(&models.Participant{})
 		_ = h.participantService.AddParticipants(event.ID, req.ParticipantEmails)
 	}
 
-	h.db.First(&event, id)
-	var inv models.Invitation
-	token := ""
-	if err := h.db.Where("event_id = ?", event.ID).First(&inv).Error; err == nil {
-		token = inv.Token
+	h.db.First(event, id)
+	token := h.getInvitationToken(event.ID)
+	return c.JSON(toEventResponse(event, token))
+}
+
+// participantStatusData returns participants with slots and aggregated counts for the event. Used by GetParticipantStatus and GetEventSummary.
+func (h *EventsHandler) participantStatusData(eventID uint) (participants []services.ParticipantWithSlots, respondedCount, totalCount, percentResponded int) {
+	if h.participantService == nil {
+		return []services.ParticipantWithSlots{}, 0, 0, 0
 	}
-	return c.JSON(toEventResponse(&event, token))
+	participants, _ = h.participantService.GetParticipantStatusWithSlots(eventID)
+	if participants == nil {
+		participants = []services.ParticipantWithSlots{}
+	}
+	totalCount = len(participants)
+	for _, p := range participants {
+		if p.Responded {
+			respondedCount++
+		}
+	}
+	if totalCount > 0 {
+		percentResponded = (respondedCount * 100) / totalCount
+	}
+	return participants, respondedCount, totalCount, percentResponded
 }
 
 // GetParticipantStatus: organizer only. Returns participants with their submitted slots, responded_count, percent_responded.
 func (h *EventsHandler) GetParticipantStatus(c *fiber.Ctx) error {
-	userID, err := getUserIDFromContext(c, h.jwtSecret)
-	if err != nil {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
-	}
-
-	id, err := c.ParamsInt("id")
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid event id"})
-	}
-
-	var event models.Event
-	if err := h.db.First(&event, id).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "event not found"})
-		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-	}
-	if event.CreatorID != userID {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not event creator"})
+	_, id, ok := h.getEventForOrganizer(c)
+	if !ok {
+		return nil
 	}
 
 	if h.participantService == nil {
 		return c.JSON(fiber.Map{"participants": []interface{}{}, "responded_count": 0, "total_count": 0, "percent_responded": 0})
 	}
-	withSlots, err := h.participantService.GetParticipantStatusWithSlots(uint(id))
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-	}
-
-	responded := 0
-	for _, p := range withSlots {
-		if p.Responded {
-			responded++
-		}
-	}
-	total := len(withSlots)
-	percent := 0
-	if total > 0 {
-		percent = (responded * 100) / total
-	}
+	participants, responded, total, percent := h.participantStatusData(uint(id))
 	return c.JSON(fiber.Map{
-		"participants":      withSlots,
+		"participants":      participants,
 		"responded_count":   responded,
 		"total_count":       total,
 		"percent_responded": percent,
 	})
 }
 
+// EventSummaryResponse is the stable response shape for GET /events/:id/summary.
+type EventSummaryResponse struct {
+	Event                  EventResponse                   `json:"event"`
+	Participants           []services.ParticipantWithSlots `json:"participants"`
+	RespondedCount         int                             `json:"responded_count"`
+	TotalCount             int                             `json:"total_count"`
+	PercentResponded       int                             `json:"percent_responded"`
+	BestTimes              []BestTimeResponse              `json:"best_times"` // top 1-3 recommendations
+	Note                   string                          `json:"note,omitempty"`
+	ExcludedParticipantIDs []uint                          `json:"excluded_participant_ids,omitempty"`
+}
+
+const summaryBestTimesLimit = 3
+
+// GetEventSummary: organizer only. Returns event details, participants with slots, and top 1-3 best-time recommendations in one response.
+func (h *EventsHandler) GetEventSummary(c *fiber.Ctx) error {
+	event, id, ok := h.getEventForOrganizer(c)
+	if !ok {
+		return nil
+	}
+
+	token := h.getInvitationToken(event.ID)
+	eventResp := toEventResponse(event, token)
+	participants, respondedCount, totalCount, percentResponded := h.participantStatusData(id)
+
+	bestTimes := []BestTimeResponse{}
+	var note string
+	var excludedIDs []uint
+	if h.schedulingService != nil {
+		resp, err := h.schedulingService.GetBestTimesResponse(id, 0)
+		if err == nil {
+			n := len(resp.Slots)
+			if n > summaryBestTimesLimit {
+				n = summaryBestTimesLimit
+			}
+			for i := 0; i < n; i++ {
+				bestTimes = append(bestTimes, formatBestTimeResult(resp.Slots[i]))
+			}
+			note = resp.Note
+			excludedIDs = resp.ExcludedParticipantIDs
+		}
+	}
+
+	return c.JSON(EventSummaryResponse{
+		Event:                  eventResp,
+		Participants:           participants,
+		RespondedCount:         respondedCount,
+		TotalCount:             totalCount,
+		PercentResponded:       percentResponded,
+		BestTimes:              bestTimes,
+		Note:                   note,
+		ExcludedParticipantIDs: excludedIDs,
+	})
+}
+
 // DeleteEvent: organizer only. Cascades: availabilities, participants, invitations.
 func (h *EventsHandler) DeleteEvent(c *fiber.Ctx) error {
-	userID, err := getUserIDFromContext(c, h.jwtSecret)
-	if err != nil {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
-	}
-
-	id, err := c.ParamsInt("id")
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid event id"})
-	}
-
-	var event models.Event
-	if err := h.db.First(&event, id).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "event not found"})
-		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-	}
-	if event.CreatorID != userID {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not event creator"})
+	event, id, ok := h.getEventForOrganizer(c)
+	if !ok {
+		return nil
 	}
 
 	h.db.Where("event_id = ?", id).Delete(&models.Availability{})
 	h.db.Where("event_id = ?", id).Delete(&models.Participant{})
 	h.db.Where("event_id = ?", id).Delete(&models.Invitation{})
-	if err := h.db.Delete(&event).Error; err != nil {
+	if err := h.db.Delete(event).Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.Status(fiber.StatusNoContent).Send(nil)
+}
+
+// getEventForOrganizer validates JWT, loads the event by :id, and verifies the user is the creator.
+// Returns (event, id, true) on success. On failure writes the response to c and returns (nil, 0, false); the handler should then return nil.
+func (h *EventsHandler) getEventForOrganizer(c *fiber.Ctx) (*models.Event, uint, bool) {
+	userID, err := getUserIDFromContext(c, h.jwtSecret)
+	if err != nil {
+		c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+		return nil, 0, false
+	}
+	id, err := c.ParamsInt("id")
+	if err != nil {
+		c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid event id"})
+		return nil, 0, false
+	}
+	var event models.Event
+	if err := h.db.First(&event, id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "event not found"})
+		} else {
+			c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+		return nil, 0, false
+	}
+	if event.CreatorID != userID {
+		c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not event creator"})
+		return nil, 0, false
+	}
+	return &event, uint(id), true
+}
+
+// getInvitationToken returns the invitation token for the event, or "" if none.
+func (h *EventsHandler) getInvitationToken(eventID uint) string {
+	var inv models.Invitation
+	if err := h.db.Where("event_id = ?", eventID).First(&inv).Error; err == nil {
+		return inv.Token
+	}
+	return ""
 }
 
 // getUserIDFromContext extracts and validates JWT from Authorization: Bearer header.
@@ -350,14 +388,14 @@ func toEventResponse(e *models.Event, token string) EventResponse {
 		Location:        e.Location,
 		DurationMinutes: e.DurationMinutes,
 		ShareLink:       shareLink,
-		CreatedAt:       e.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		CreatedAt:       e.CreatedAt.Format(timeFormatISO8601),
 	}
 	if e.TimeFrameStart != nil {
-		s := e.TimeFrameStart.Format("2006-01-02T15:04:05Z07:00")
+		s := e.TimeFrameStart.Format(timeFormatISO8601)
 		r.TimeFrameStart = &s
 	}
 	if e.TimeFrameEnd != nil {
-		s := e.TimeFrameEnd.Format("2006-01-02T15:04:05Z07:00")
+		s := e.TimeFrameEnd.Format(timeFormatISO8601)
 		r.TimeFrameEnd = &s
 	}
 	return r

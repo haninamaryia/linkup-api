@@ -40,7 +40,6 @@ func (s *ParticipantService) AddParticipants(eventID uint, emails []string) erro
 		if email == "" {
 			continue
 		}
-		// Find or create: do not create a second participant for the same event+email
 		p := models.Participant{EventID: eventID, Email: email}
 		err := s.db.Where("event_id = ? AND email = ?", eventID, email).FirstOrCreate(&p).Error
 		if err != nil {
@@ -48,11 +47,6 @@ func (s *ParticipantService) AddParticipants(eventID uint, emails []string) erro
 		}
 	}
 	return nil
-}
-
-func (s *ParticipantService) MarkResponded(participantID uint) error {
-	now := time.Now()
-	return s.db.Model(&models.Participant{}).Where("id = ?", participantID).Update("responded_at", now).Error
 }
 
 func (s *ParticipantService) MarkRespondedByEmail(eventID uint, email string) error {
@@ -67,7 +61,6 @@ func (s *ParticipantService) GetParticipantStatus(eventID uint) ([]ParticipantSt
 	if err := s.db.Where("event_id = ?", eventID).Find(&participants).Error; err != nil {
 		return nil, err
 	}
-
 	var result []ParticipantStatus
 	for _, p := range participants {
 		responded := p.RespondedAt != nil
@@ -104,13 +97,10 @@ func (s *ParticipantService) GetParticipantStatusWithSlots(eventID uint) ([]Part
 	if err := s.db.Where("event_id = ?", eventID).Find(&participants).Error; err != nil {
 		return nil, err
 	}
-
 	var availabilities []models.Availability
 	if err := s.db.Where("event_id = ?", eventID).Find(&availabilities).Error; err != nil {
 		return nil, err
 	}
-
-	// Group availabilities by participant_id (nil = anonymous, we don't attach to any participant in response)
 	slotsByParticipant := make(map[uint][]SlotInfo)
 	for _, a := range availabilities {
 		if a.ParticipantID == nil {
@@ -121,7 +111,6 @@ func (s *ParticipantService) GetParticipantStatusWithSlots(eventID uint) ([]Part
 			SlotEnd:   a.SlotEnd.Format(timeFormatISO8601),
 		})
 	}
-
 	result := make([]ParticipantWithSlots, 0, len(participants))
 	for _, p := range participants {
 		slots := slotsByParticipant[p.ID]

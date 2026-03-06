@@ -36,16 +36,18 @@ go run ./cmd
 | `DATABASE_URL`    | `linkup.db` | SQLite database file path      |
 | `JWT_SECRET`      | `dev-secret`| Secret for signing JWTs        |
 
+**Database:** The `participants` table has a unique constraint on `(event_id, email)` so the same email cannot appear twice for one event. If you had an older DB with a different schema, remove `linkup.db` (and `linkup.db-journal` if present) for a fresh start.
+
 ## API overview
 
 | Area          | Endpoints |
 |---------------|-----------|
 | Auth          | `POST /auth/request-code`, `POST /auth/verify-code` |
-| Events        | `POST /events`, `GET /events`, `GET /events/:id`, `PATCH /events/:id`, `DELETE /events/:id`, `GET /events/:id/participant-status` |
+| Events        | `POST /events`, `GET /events`, `GET /events/:id`, `PATCH /events/:id`, `DELETE /events/:id`, `GET /events/:id/participant-status`, **`GET /events/:id/summary`** |
 | Availability  | `POST /events/:id/availability`, `GET /events/:id/best-time`, `GET /events/:id/best-times` |
 | Invitations   | `GET /inv/:token`, `POST /inv/:token/availability` |
 
-Endpoints under `/events` (except `GET /events/:id`) and `GET /events/:id/participant-status` require a JWT in the `Authorization: Bearer <token>` header. Invitation endpoints do not require auth.
+Endpoints under `/events` (except `GET /events/:id`) and `GET /events/:id/participant-status` and `GET /events/:id/summary` require a JWT in the `Authorization: Bearer <token>` header. Invitation endpoints do not require auth.
 
 Base URL in examples: **`http://localhost:8181`**.
 
@@ -86,11 +88,9 @@ Use this token in subsequent requests: `Authorization: Bearer <JWT>`.
 ```bash
 export TOKEN="<your-jwt>"
 
-# eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxLCJlbWFpbCI6ImFsaWNlQGV4YW1wbGUuY29tIiwiZXhwIjoxNzcyNzM1MTE4LCJpYXQiOjE3NzI2NDg3MTh9.I_TURP99zabGciIexhmvXxf4Vs_7oSizEVkAOV5EI-E
-
-curl -s -X POST http://localhost:8181/events \
+curl -s -X POST http://localhost:8080/events \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxLCJlbWFpbCI6ImFsaWNlQGV4YW1wbGUuY29tIiwiZXhwIjoxNzcyNzM1MTE4LCJpYXQiOjE3NzI2NDg3MTh9.I_TURP99zabGciIexhmvXxf4Vs_7oSizEVkAOV5EI-E" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{
     "title": "Team sync",
     "description": "Weekly standup",
@@ -106,7 +106,7 @@ Response (201): event object with `id`, `share_link` (e.g. `/inv/abc123...`), `t
 **List my events**
 
 ```bash
-curl -s http://localhost:8181/events -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxLCJlbWFpbCI6ImFsaWNlQGV4YW1wbGUuY29tIiwiZXhwIjoxNzcyNzM1MTE4LCJpYXQiOjE3NzI2NDg3MTh9.I_TURP99zabGciIexhmvXxf4Vs_7oSizEVkAOV5EI-E"
+curl -s http://localhost:8080/events -H "Authorization: Bearer $TOKEN"
 ```
 
 **Get single event** (no auth required; returns event + share_link):
@@ -120,23 +120,44 @@ curl -s http://localhost:8181/events/1
 ```bash
 curl -s -X PATCH http://localhost:8181/events/1 \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxLCJlbWFpbCI6ImFsaWNlQGV4YW1wbGUuY29tIiwiZXhwIjoxNzcyNzM1MTE4LCJpYXQiOjE3NzI2NDg3MTh9.I_TURP99zabGciIexhmvXxf4Vs_7oSizEVkAOV5EI-E" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"title":"Updated title","participant_emails":["bob@example.com"]}'
 ```
 
 **Delete event** (organizer only; cascades to availabilities, participants, invitations):
 
 ```bash
-curl -s -X DELETE http://localhost:8181/events/1 -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxLCJlbWFpbCI6ImFsaWNlQGV4YW1wbGUuY29tIiwiZXhwIjoxNzcyNzM1MTE4LCJpYXQiOjE3NzI2NDg3MTh9.I_TURP99zabGciIexhmvXxf4Vs_7oSizEVkAOV5EI-E"
+curl -s -X DELETE http://localhost:8080/events/1 -H "Authorization: Bearer $TOKEN"
 ```
 
 **Participant status** (organizer only; includes **per-participant slots** — who submitted which times):
 
 ```bash
-curl -s http://localhost:8181/events/1/participant-status -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxLCJlbWFpbCI6ImFsaWNlQGV4YW1wbGUuY29tIiwiZXhwIjoxNzcyNzM1MTE4LCJpYXQiOjE3NzI2NDg3MTh9.I_TURP99zabGciIexhmvXxf4Vs_7oSizEVkAOV5EI-E"
+curl -s http://localhost:8080/events/1/participant-status -H "Authorization: Bearer $TOKEN"
 ```
 
 Response: `participants` (each with `id`, `email`, `responded`, `responded_at`, **`slots`** array of `{slot_start, slot_end}`), `responded_count`, `total_count`, `percent_responded`.
+
+**Event summary** (organizer only; **one endpoint for the full event page** — event details, participants with slots, and top 1–3 best-time recommendations):
+
+```bash
+curl -s http://localhost:8181/events/1/summary -H "Authorization: Bearer $TOKEN"
+```
+
+Response (200) — **stable shape**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event` | object | Same as single-event response: `id`, `creator_id`, `title`, `description`, `location`, `duration_minutes`, `time_frame_start`, `time_frame_end`, `share_link`, `created_at` |
+| `participants` | array | Each item: `id`, `email`, `responded`, `responded_at`, `slots` (array of `{slot_start, slot_end}`) |
+| `responded_count` | number | Number of participants who have submitted availability |
+| `total_count` | number | Total number of participants |
+| `percent_responded` | number | 0–100 |
+| `best_times` | array | Top 1–3 recommended slots. Each: `slot_start`, `slot_end`, `available_count`, `total` |
+| `note` | string (optional) | Set when no slot fits everyone (e.g. fallback message) |
+| `excluded_participant_ids` | array (optional) | Participant IDs excluded from the top recommendation when `note` is set |
+
+Frontends can build the event dashboard with **2–3 API calls total**: auth (request-code + verify-code), optional `GET /events` to list, then **`GET /events/:id/summary`** to render the full event page.
 
 ---
 

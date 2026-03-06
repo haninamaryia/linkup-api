@@ -27,8 +27,10 @@ type SubmitAvailabilityRequest struct {
 }
 
 type BestTimeResponse struct {
-	SlotStart string `json:"slot_start"`
-	SlotEnd   string `json:"slot_end"`
+	SlotStart      string `json:"slot_start"`
+	SlotEnd        string `json:"slot_end"`
+	AvailableCount int    `json:"available_count"`
+	Total          int    `json:"total"`
 }
 
 // SubmitAvailability: parse slot_start/slot_end (ISO8601), create Availability row.
@@ -80,12 +82,25 @@ func (h *AvailabilityHandler) SubmitAvailability(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"id":         avail.ID,
 		"event_id":   avail.EventID,
-		"slot_start": avail.SlotStart.Format("2006-01-02T15:04:05Z07:00"),
-		"slot_end":   avail.SlotEnd.Format("2006-01-02T15:04:05Z07:00"),
+		"slot_start": avail.SlotStart.Format(timeFormatISO8601),
+		"slot_end":   avail.SlotEnd.Format(timeFormatISO8601),
 	})
 }
 
-// GetBestTimes: all overlapping slots within event time frame (30-min step). Optionally includes note and excluded_participant_ids when not all participants can be included.
+// ISO8601 format for JSON date-times (RFC3339).
+const timeFormatISO8601 = "2006-01-02T15:04:05Z07:00"
+
+// formatBestTimeResult converts a scheduling result slot to the API response shape. Used by GetBestTimes, GetBestTime, and GetEventSummary.
+func formatBestTimeResult(r services.BestTimeResult) BestTimeResponse {
+	return BestTimeResponse{
+		SlotStart:      r.SlotStart.Format(timeFormatISO8601),
+		SlotEnd:        r.SlotEnd.Format(timeFormatISO8601),
+		AvailableCount: r.AvailableCount,
+		Total:          r.Total,
+	}
+}
+
+// GetBestTimes: ranked list of candidate slots (30-min step), each with available_count/total.
 func (h *AvailabilityHandler) GetBestTimes(c *fiber.Ctx) error {
 	eventID, err := c.ParamsInt("id")
 	if err != nil {
@@ -106,11 +121,8 @@ func (h *AvailabilityHandler) GetBestTimes(c *fiber.Ctx) error {
 	}
 
 	slots := make([]BestTimeResponse, len(resp.Slots))
-	for i, r := range resp.Slots {
-		slots[i] = BestTimeResponse{
-			SlotStart: r.SlotStart.Format("2006-01-02T15:04:05Z07:00"),
-			SlotEnd:   r.SlotEnd.Format("2006-01-02T15:04:05Z07:00"),
-		}
+	for i := range resp.Slots {
+		slots[i] = formatBestTimeResult(resp.Slots[i])
 	}
 	out := fiber.Map{"best_times": slots}
 	if resp.Note != "" {
@@ -120,7 +132,7 @@ func (h *AvailabilityHandler) GetBestTimes(c *fiber.Ctx) error {
 	return c.JSON(out)
 }
 
-// GetBestTime: first overlapping slot (same logic as best-times, returns first only).
+// GetBestTime: top-ranked slot plus available_count/total.
 func (h *AvailabilityHandler) GetBestTime(c *fiber.Ctx) error {
 	eventID, err := c.ParamsInt("id")
 	if err != nil {
@@ -136,8 +148,16 @@ func (h *AvailabilityHandler) GetBestTime(c *fiber.Ctx) error {
 	}
 
 	r := resp.Slots[0]
-	return c.JSON(BestTimeResponse{
-		SlotStart: r.SlotStart.Format("2006-01-02T15:04:05Z07:00"),
-		SlotEnd:   r.SlotEnd.Format("2006-01-02T15:04:05Z07:00"),
-	})
+	formatted := formatBestTimeResult(r)
+	out := fiber.Map{
+		"slot_start":      formatted.SlotStart,
+		"slot_end":        formatted.SlotEnd,
+		"available_count": formatted.AvailableCount,
+		"total":           formatted.Total,
+	}
+	if resp.Note != "" {
+		out["note"] = resp.Note
+		out["excluded_participant_ids"] = resp.ExcludedParticipantIDs
+	}
+	return c.JSON(out)
 }

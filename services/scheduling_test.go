@@ -198,9 +198,25 @@ func setupSchedulingDB(t *testing.T) *gorm.DB {
 	return db
 }
 
+// addEventWithTwoParticipants creates an event and two participants for it; returns event and participant IDs for use in Availability.
+func addEventWithTwoParticipants(db *gorm.DB, event *models.Event) (p1ID, p2ID uint) {
+	db.Create(event)
+	p1 := models.Participant{EventID: event.ID, Email: "p1@test.com"}
+	p2 := models.Participant{EventID: event.ID, Email: "p2@test.com"}
+	db.Create(&p1)
+	db.Create(&p2)
+	return p1.ID, p2.ID
+}
+
+func addEventWithOneParticipant(db *gorm.DB, event *models.Event) uint {
+	db.Create(event)
+	p := models.Participant{EventID: event.ID, Email: "p1@test.com"}
+	db.Create(&p)
+	return p.ID
+}
+
 func TestGetBestTimesResponse_AllParticipantsOverlap(t *testing.T) {
 	db := setupSchedulingDB(t)
-	// Event: 30 min duration, frame 09:00-12:00
 	frameStart := mustTime("2025-03-10T09:00:00Z")
 	frameEnd := mustTime("2025-03-10T12:00:00Z")
 	event := models.Event{
@@ -210,11 +226,10 @@ func TestGetBestTimesResponse_AllParticipantsOverlap(t *testing.T) {
 		TimeFrameStart:  &frameStart,
 		TimeFrameEnd:    &frameEnd,
 	}
-	db.Create(&event)
+	p1ID, p2ID := addEventWithTwoParticipants(db, &event)
 
-	// Two participants: P1 10:00-11:00, P2 10:15-11:00 -> intersection 10:15-11:00
-	db.Create(&models.Availability{EventID: event.ID, ParticipantID: ptr(uint(1)), SlotStart: mustTime("2025-03-10T10:00:00Z"), SlotEnd: mustTime("2025-03-10T11:00:00Z")})
-	db.Create(&models.Availability{EventID: event.ID, ParticipantID: ptr(uint(2)), SlotStart: mustTime("2025-03-10T10:15:00Z"), SlotEnd: mustTime("2025-03-10T11:00:00Z")})
+	db.Create(&models.Availability{EventID: event.ID, ParticipantID: &p1ID, SlotStart: mustTime("2025-03-10T10:00:00Z"), SlotEnd: mustTime("2025-03-10T11:00:00Z")})
+	db.Create(&models.Availability{EventID: event.ID, ParticipantID: &p2ID, SlotStart: mustTime("2025-03-10T10:15:00Z"), SlotEnd: mustTime("2025-03-10T11:00:00Z")})
 
 	svc := NewSchedulingService(db)
 	resp, err := svc.GetBestTimesResponse(event.ID, 30)
@@ -227,12 +242,16 @@ func TestGetBestTimesResponse_AllParticipantsOverlap(t *testing.T) {
 	if len(resp.ExcludedParticipantIDs) > 0 {
 		t.Errorf("unexpected excluded: %v", resp.ExcludedParticipantIDs)
 	}
-	// 10:15-11:00 = 45 min, 30 min duration, 30 min step -> 10:15-10:45 only
-	if len(resp.Slots) != 1 {
-		t.Fatalf("got %d slots, want 1", len(resp.Slots))
+	// Ranked list: top slot should be when both available (10:30-11:00), with available_count=2
+	if len(resp.Slots) == 0 {
+		t.Fatal("expected at least one slot")
 	}
-	if !resp.Slots[0].SlotStart.Equal(mustTime("2025-03-10T10:15:00Z")) || !resp.Slots[0].SlotEnd.Equal(mustTime("2025-03-10T10:45:00Z")) {
-		t.Errorf("slot: got [%v, %v]", resp.Slots[0].SlotStart, resp.Slots[0].SlotEnd)
+	top := resp.Slots[0]
+	if top.AvailableCount != 2 || top.Total != 2 {
+		t.Errorf("top slot: available_count=%d total=%d, want 2/2", top.AvailableCount, top.Total)
+	}
+	if !top.SlotStart.Equal(mustTime("2025-03-10T10:30:00Z")) || !top.SlotEnd.Equal(mustTime("2025-03-10T11:00:00Z")) {
+		t.Errorf("top slot: got [%v, %v], want 10:30-11:00", top.SlotStart, top.SlotEnd)
 	}
 }
 
@@ -247,11 +266,10 @@ func TestGetBestTimesResponse_AllParticipantsOverlap_TwoSlots(t *testing.T) {
 		TimeFrameStart:  &frameStart,
 		TimeFrameEnd:    &frameEnd,
 	}
-	db.Create(&event)
+	p1ID, p2ID := addEventWithTwoParticipants(db, &event)
 
-	// Overlap 10:15-11:15 (1 hour) -> 30-min step gives 10:15-10:45, 10:45-11:15
-	db.Create(&models.Availability{EventID: event.ID, ParticipantID: ptr(uint(1)), SlotStart: mustTime("2025-03-10T10:00:00Z"), SlotEnd: mustTime("2025-03-10T11:30:00Z")})
-	db.Create(&models.Availability{EventID: event.ID, ParticipantID: ptr(uint(2)), SlotStart: mustTime("2025-03-10T10:15:00Z"), SlotEnd: mustTime("2025-03-10T11:15:00Z")})
+	db.Create(&models.Availability{EventID: event.ID, ParticipantID: &p1ID, SlotStart: mustTime("2025-03-10T10:00:00Z"), SlotEnd: mustTime("2025-03-10T11:30:00Z")})
+	db.Create(&models.Availability{EventID: event.ID, ParticipantID: &p2ID, SlotStart: mustTime("2025-03-10T10:15:00Z"), SlotEnd: mustTime("2025-03-10T11:15:00Z")})
 
 	svc := NewSchedulingService(db)
 	resp, err := svc.GetBestTimesResponse(event.ID, 30)
@@ -261,14 +279,16 @@ func TestGetBestTimesResponse_AllParticipantsOverlap_TwoSlots(t *testing.T) {
 	if resp.Note != "" {
 		t.Errorf("unexpected note: %s", resp.Note)
 	}
-	if len(resp.Slots) != 2 {
-		t.Fatalf("got %d slots, want 2", len(resp.Slots))
+	// Top slot should be 10:30-11:00 (both available)
+	if len(resp.Slots) == 0 {
+		t.Fatal("expected at least one slot")
 	}
-	if !resp.Slots[0].SlotStart.Equal(mustTime("2025-03-10T10:15:00Z")) || !resp.Slots[0].SlotEnd.Equal(mustTime("2025-03-10T10:45:00Z")) {
-		t.Errorf("first slot: got [%v, %v]", resp.Slots[0].SlotStart, resp.Slots[0].SlotEnd)
+	top := resp.Slots[0]
+	if top.AvailableCount != 2 || top.Total != 2 {
+		t.Errorf("top slot: available_count=%d total=%d, want 2/2", top.AvailableCount, top.Total)
 	}
-	if !resp.Slots[1].SlotStart.Equal(mustTime("2025-03-10T10:45:00Z")) || !resp.Slots[1].SlotEnd.Equal(mustTime("2025-03-10T11:15:00Z")) {
-		t.Errorf("second slot: got [%v, %v]", resp.Slots[1].SlotStart, resp.Slots[1].SlotEnd)
+	if !top.SlotStart.Equal(mustTime("2025-03-10T10:30:00Z")) || !top.SlotEnd.Equal(mustTime("2025-03-10T11:00:00Z")) {
+		t.Errorf("first slot: got [%v, %v]", top.SlotStart, top.SlotEnd)
 	}
 }
 
@@ -284,10 +304,10 @@ func TestGetBestTimesResponse_30MinStepLargeOverlap(t *testing.T) {
 		TimeFrameStart:  &frameStart,
 		TimeFrameEnd:    &frameEnd,
 	}
-	db.Create(&event)
+	p1ID := addEventWithOneParticipant(db, &event)
 
 	// One participant available 12:00-08:00 (full frame)
-	db.Create(&models.Availability{EventID: event.ID, ParticipantID: ptr(uint(1)), SlotStart: frameStart, SlotEnd: frameEnd})
+	db.Create(&models.Availability{EventID: event.ID, ParticipantID: &p1ID, SlotStart: frameStart, SlotEnd: frameEnd})
 
 	svc := NewSchedulingService(db)
 	resp, err := svc.GetBestTimesResponse(event.ID, 45)
@@ -320,11 +340,11 @@ func TestGetBestTimesResponse_FallbackWhenNotAllAvailable(t *testing.T) {
 		TimeFrameStart:  &frameStart,
 		TimeFrameEnd:    &frameEnd,
 	}
-	db.Create(&event)
+	p1ID, p2ID := addEventWithTwoParticipants(db, &event)
 
 	// Two participants with NO overlap: P1 09:00-10:00, P2 11:00-12:00
-	db.Create(&models.Availability{EventID: event.ID, ParticipantID: ptr(uint(1)), SlotStart: mustTime("2025-03-10T09:00:00Z"), SlotEnd: mustTime("2025-03-10T10:00:00Z")})
-	db.Create(&models.Availability{EventID: event.ID, ParticipantID: ptr(uint(2)), SlotStart: mustTime("2025-03-10T11:00:00Z"), SlotEnd: mustTime("2025-03-10T12:00:00Z")})
+	db.Create(&models.Availability{EventID: event.ID, ParticipantID: &p1ID, SlotStart: mustTime("2025-03-10T09:00:00Z"), SlotEnd: mustTime("2025-03-10T10:00:00Z")})
+	db.Create(&models.Availability{EventID: event.ID, ParticipantID: &p2ID, SlotStart: mustTime("2025-03-10T11:00:00Z"), SlotEnd: mustTime("2025-03-10T12:00:00Z")})
 
 	svc := NewSchedulingService(db)
 	resp, err := svc.GetBestTimesResponse(event.ID, 30)
@@ -383,8 +403,13 @@ func TestGetBestTimesResponse_AnonymousSlotsTreatedAsOneGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBestTimesResponse: %v", err)
 	}
-	// Union of 10:00-11:00 and 10:30-11:30 = 10:00-11:30. Then 30-min slots with 30-min step: 10:00-10:30, 10:30-11:00, 11:00-11:30
-	if len(resp.Slots) != 3 {
-		t.Fatalf("got %d slots, want 3", len(resp.Slots))
+	// Union of 10:00-11:00 and 10:30-11:30 = 10:00-11:30. Ranked slots with 30-min step: 10:00-10:30, 10:30-11:00, 11:00-11:30 (all count=1)
+	if len(resp.Slots) < 3 {
+		t.Fatalf("got %d slots, want at least 3", len(resp.Slots))
+	}
+	for i := range resp.Slots {
+		if resp.Slots[i].AvailableCount != 1 || resp.Slots[i].Total != 1 {
+			t.Errorf("slot %d: available_count=%d total=%d", i, resp.Slots[i].AvailableCount, resp.Slots[i].Total)
+		}
 	}
 }

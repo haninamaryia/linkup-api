@@ -23,7 +23,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB, jwtSecret string) {
 	emailSender := services.NewStubEmailSender()
 
 	authHandler := NewAuthHandler(authService, jwtSecret)
-	eventsHandler := NewEventsHandler(db, jwtSecret, participantService, emailSender)
+	eventsHandler := NewEventsHandler(db, jwtSecret, participantService, emailSender, schedulingService)
 	availHandler := NewAvailabilityHandler(db, schedulingService)
 	invHandler := NewInvitationHandler(invitationService, participantService, db)
 
@@ -36,6 +36,7 @@ func SetupRoutes(app *fiber.App, db *gorm.DB, jwtSecret string) {
 	app.Patch("/events/:id", eventsHandler.UpdateEvent)
 	app.Delete("/events/:id", eventsHandler.DeleteEvent)
 	app.Get("/events/:id/participant-status", eventsHandler.GetParticipantStatus)
+	app.Get("/events/:id/summary", eventsHandler.GetEventSummary)
 
 	app.Post("/events/:id/availability", availHandler.SubmitAvailability)
 	app.Get("/events/:id/best-time", availHandler.GetBestTime)

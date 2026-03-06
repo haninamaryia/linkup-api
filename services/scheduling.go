@@ -1,7 +1,6 @@
 package services
 
 import (
-	"fmt"
 	"sort"
 	"time"
 
@@ -23,23 +22,24 @@ func NewSchedulingService(db *gorm.DB) *SchedulingService {
 	return &SchedulingService{db: db}
 }
 
-// BestTimeResult is a single candidate meeting slot.
+// BestTimeResult is a single candidate meeting slot with availability count.
 type BestTimeResult struct {
-	SlotStart time.Time `json:"slot_start"`
-	SlotEnd   time.Time `json:"slot_end"`
+	SlotStart      time.Time `json:"slot_start"`
+	SlotEnd        time.Time `json:"slot_end"`
+	AvailableCount int      `json:"available_count"` // number of participants who can make this slot
+	Total          int      `json:"total"`          // total number of participants (with availability)
 }
 
-// BestTimesResponse is the result of finding best times, with optional fallback note.
+// BestTimesResponse is the result of finding best times, ranked by most participants then earliest.
 type BestTimesResponse struct {
-	Slots                   []BestTimeResult `json:"best_times"`
-	Note                    string          `json:"note,omitempty"`
-	ExcludedParticipantIDs  []uint          `json:"excluded_participant_ids,omitempty"`
+	Slots                  []BestTimeResult `json:"best_times"`
+	Note                   string          `json:"note,omitempty"`
+	ExcludedParticipantIDs []uint          `json:"excluded_participant_ids,omitempty"`
 }
 
-// GetBestTimesResponse finds all possible meeting slots of the given duration within the organizer's
-// time frame where all participants are available. Uses 30-minute steps for large overlaps.
-// If no slot exists where all are available, returns slots where most are available and sets Note
-// and ExcludedParticipantIDs.
+// GetBestTimesResponse finds candidate slots (duration-sized, 30-min step), scores each by number of
+// participants available, tie-breaks by earliest time, and returns a ranked list. Also sets Note and
+// ExcludedParticipantIDs when the top slot does not include everyone.
 func (s *SchedulingService) GetBestTimesResponse(eventID uint, durationMinutes int) (BestTimesResponse, error) {
 	var event models.Event
 	if err := s.db.First(&event, eventID).Error; err != nil {
@@ -63,61 +63,176 @@ func (s *SchedulingService) GetBestTimesResponse(eventID uint, durationMinutes i
 		return BestTimesResponse{Slots: nil}, nil
 	}
 
-	// Group by participant: key 0 = anonymous, else participant ID
 	byParticipant := groupAvailabilitiesByParticipant(slots)
 	participantKeys := sortedParticipantKeys(byParticipant)
 	if len(participantKeys) == 0 {
 		return BestTimesResponse{Slots: nil}, nil
 	}
 
-	// Union per participant (merge overlapping intervals)
+	totalParticipants := len(participantKeys)
 	participantUnions := make(map[uint][]interval)
 	for _, key := range participantKeys {
 		participantUnions[key] = mergeIntervals(byParticipant[key])
 	}
 
-	// Intersection of all participants
-	var unionsAll [][]interval
-	for _, key := range participantKeys {
-		unionsAll = append(unionsAll, participantUnions[key])
-	}
-	allIntervals := intersectIntervalLists(unionsAll)
-	allIntervals = clipToFrame(allIntervals, event.TimeFrameStart, event.TimeFrameEnd)
-
-	if len(allIntervals) > 0 {
-		slotsOut := emitWindows(allIntervals, duration, SlotStepMinutes, event.TimeFrameStart, event.TimeFrameEnd)
-		return BestTimesResponse{Slots: slotsOut}, nil
+	// Time range: organizer frame or min/max across all availability
+	rangeStart, rangeEnd := timeRange(slots, event.TimeFrameStart, event.TimeFrameEnd)
+	if !rangeEnd.After(rangeStart) {
+		return BestTimesResponse{Slots: nil}, nil
 	}
 
-	// Fallback: try excluding one participant at a time
-	for _, excludeKey := range participantKeys {
-		var unionsWithout [][]interval
+	dur := time.Duration(duration) * time.Minute
+	step := time.Duration(SlotStepMinutes) * time.Minute
+
+	type scoredSlot struct {
+		start          time.Time
+		end            time.Time
+		availableCount int
+		availableKeys  []uint
+	}
+
+	var scored []scoredSlot
+	for start := rangeStart; start.Add(dur).Before(rangeEnd) || start.Add(dur).Equal(rangeEnd); start = start.Add(step) {
+		end := start.Add(dur)
+		if event.TimeFrameEnd != nil && end.After(*event.TimeFrameEnd) {
+			break
+		}
+		var availableKeys []uint
+		for _, key := range participantKeys {
+			if intervalCovers(start, end, participantUnions[key]) {
+				availableKeys = append(availableKeys, key)
+			}
+		}
+		scored = append(scored, scoredSlot{
+			start:          start,
+			end:            end,
+			availableCount: len(availableKeys),
+			availableKeys:  availableKeys,
+		})
+	}
+
+	// Keep only slots where at least one participant is available
+	var scoredFiltered []scoredSlot
+	for _, sc := range scored {
+		if sc.availableCount > 0 {
+			scoredFiltered = append(scoredFiltered, sc)
+		}
+	}
+	scored = scoredFiltered
+
+	// Sort: most participants first, then earliest start
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].availableCount != scored[j].availableCount {
+			return scored[i].availableCount > scored[j].availableCount
+		}
+		return scored[i].start.Before(scored[j].start)
+	})
+
+	result := make([]BestTimeResult, len(scored))
+	for i, sc := range scored {
+		result[i] = BestTimeResult{
+			SlotStart:      sc.start,
+			SlotEnd:        sc.end,
+			AvailableCount: sc.availableCount,
+			Total:          totalParticipants,
+		}
+	}
+
+	resp := BestTimesResponse{Slots: result}
+
+	// Note and excluded when top slot doesn't include everyone
+	if len(scored) > 0 && scored[0].availableCount < totalParticipants {
+		availableSet := make(map[uint]bool)
+		for _, k := range scored[0].availableKeys {
+			availableSet[k] = true
+		}
+		var excludedIDs []uint
 		for _, k := range participantKeys {
-			if k != excludeKey {
-				unionsWithout = append(unionsWithout, participantUnions[k])
+			if k != 0 && !availableSet[k] {
+				excludedIDs = append(excludedIDs, k)
 			}
 		}
-		intervals := intersectIntervalLists(unionsWithout)
-		intervals = clipToFrame(intervals, event.TimeFrameStart, event.TimeFrameEnd)
-		if len(intervals) > 0 {
-			slotsOut := emitWindows(intervals, duration, SlotStepMinutes, event.TimeFrameStart, event.TimeFrameEnd)
-			var excludedIDs []uint
-			if excludeKey != 0 {
-				excludedIDs = []uint{excludeKey}
-			}
-			note := "No time slot where all participants are available. Showing slots where the most participants are available."
-			if len(excludedIDs) > 0 {
-				note += fmt.Sprintf(" Excluded participant ID(s): %v", excludedIDs)
-			}
-			return BestTimesResponse{
-				Slots:                  slotsOut,
-				Note:                   note,
-				ExcludedParticipantIDs: excludedIDs,
-			}, nil
-		}
+		resp.Note = formatExcludedNote(s.db, excludedIDs)
+		resp.ExcludedParticipantIDs = excludedIDs
 	}
 
-	return BestTimesResponse{Slots: nil}, nil
+	return resp, nil
+}
+
+// timeRange returns the window to generate candidates: frame if set, else min(start) to max(end) of slots.
+func timeRange(slots []models.Availability, frameStart, frameEnd *time.Time) (start, end time.Time) {
+	if frameStart != nil && frameEnd != nil {
+		return *frameStart, *frameEnd
+	}
+	if len(slots) == 0 {
+		return time.Time{}, time.Time{}
+	}
+	minT := slots[0].SlotStart
+	maxT := slots[0].SlotEnd
+	for _, s := range slots[1:] {
+		if s.SlotStart.Before(minT) {
+			minT = s.SlotStart
+		}
+		if s.SlotEnd.After(maxT) {
+			maxT = s.SlotEnd
+		}
+	}
+	if frameStart != nil && minT.Before(*frameStart) {
+		minT = *frameStart
+	}
+	if frameEnd != nil && maxT.After(*frameEnd) {
+		maxT = *frameEnd
+	}
+	return minT, maxT
+}
+
+// intervalCovers reports whether the window [windowStart, windowEnd] is fully inside one of the union intervals.
+func intervalCovers(windowStart, windowEnd time.Time, union []interval) bool {
+	for _, iv := range union {
+		if !windowStart.Before(iv.start) && !windowEnd.After(iv.end) {
+			return true
+		}
+	}
+	return false
+}
+
+// formatExcludedNote returns a user-friendly note listing excluded participants by email.
+func formatExcludedNote(db *gorm.DB, excludedParticipantIDs []uint) string {
+	base := "Sorry, there is no time slot where everyone is available :( This is the best we could find"
+	if len(excludedParticipantIDs) == 0 {
+		return base + ", but one or more participants could not be included."
+	}
+	var participants []models.Participant
+	if err := db.Where("id IN ?", excludedParticipantIDs).Find(&participants).Error; err != nil || len(participants) == 0 {
+		return base + "."
+	}
+	emails := make([]string, len(participants))
+	for i, p := range participants {
+		emails[i] = p.Email
+	}
+	switch len(emails) {
+	case 1:
+		return base + ", but " + emails[0] + " is excluded."
+	case 2:
+		return base + ", but " + emails[0] + " and " + emails[1] + " are excluded."
+	default:
+		return base + ", but " + joinEmails(emails) + " are excluded."
+	}
+}
+
+func joinEmails(emails []string) string {
+	if len(emails) == 0 {
+		return ""
+	}
+	if len(emails) == 1 {
+		return emails[0]
+	}
+	s := emails[0]
+	for i := 1; i < len(emails)-1; i++ {
+		s += ", " + emails[i]
+	}
+	s += ", and " + emails[len(emails)-1]
+	return s
 }
 
 type interval struct {
