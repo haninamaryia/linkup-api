@@ -1,0 +1,24 @@
+# Smoke contract: health only. Validated by Dredd in Docker.
+# Dredd runs against http://linkup-api:8181 (same Docker network).
+
+openapi: 3.0.3
+info:
+  title: Linkup API — Smoke (health)
+  version: 0.1.0
+
+paths:
+  /health:
+    get:
+      summary: Liveness
+      operationId: health
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"

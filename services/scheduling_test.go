@@ -188,6 +188,121 @@ func ptr(u uint) *uint {
 	return &u
 }
 
+// --- Unit tests for pure scheduling helpers (no DB) ---
+
+func TestIntervalCovers(t *testing.T) {
+	union := []interval{
+		{start: mustTime("2025-03-10T10:00:00Z"), end: mustTime("2025-03-10T12:00:00Z")},
+	}
+	tests := []struct {
+		windowStart, windowEnd string
+		want                   bool
+	}{
+		{"2025-03-10T10:00:00Z", "2025-03-10T10:30:00Z", true},
+		{"2025-03-10T11:00:00Z", "2025-03-10T11:30:00Z", true},
+		{"2025-03-10T11:30:00Z", "2025-03-10T12:00:00Z", true},
+		{"2025-03-10T09:00:00Z", "2025-03-10T10:00:00Z", false}, // window starts before union
+		{"2025-03-10T12:00:00Z", "2025-03-10T13:00:00Z", false}, // window ends after union
+		{"2025-03-10T12:01:00Z", "2025-03-10T12:30:00Z", false},
+	}
+	for _, tt := range tests {
+		start := mustTime(tt.windowStart)
+		end := mustTime(tt.windowEnd)
+		got := intervalCovers(start, end, union)
+		if got != tt.want {
+			t.Errorf("intervalCovers(%s, %s) = %v, want %v", tt.windowStart, tt.windowEnd, got, tt.want)
+		}
+	}
+}
+
+func TestIntervalCovers_multipleUnionIntervals(t *testing.T) {
+	union := []interval{
+		{start: mustTime("2025-03-10T09:00:00Z"), end: mustTime("2025-03-10T10:00:00Z")},
+		{start: mustTime("2025-03-10T11:00:00Z"), end: mustTime("2025-03-10T12:00:00Z")},
+	}
+	// Window in second interval
+	if !intervalCovers(mustTime("2025-03-10T11:15:00Z"), mustTime("2025-03-10T11:45:00Z"), union) {
+		t.Error("expected true for window inside second interval")
+	}
+	// Window spanning gap
+	if intervalCovers(mustTime("2025-03-10T09:30:00Z"), mustTime("2025-03-10T11:30:00Z"), union) {
+		t.Error("expected false for window spanning gap")
+	}
+}
+
+func TestSortedParticipantKeys(t *testing.T) {
+	byParticipant := map[uint][]interval{
+		2: {{start: mustTime("2025-03-10T10:00:00Z"), end: mustTime("2025-03-10T11:00:00Z")}},
+		0: {{start: mustTime("2025-03-10T09:00:00Z"), end: mustTime("2025-03-10T10:00:00Z")}},
+		1: {{start: mustTime("2025-03-10T10:30:00Z"), end: mustTime("2025-03-10T11:30:00Z")}},
+	}
+	got := sortedParticipantKeys(byParticipant)
+	want := []uint{0, 1, 2}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("at %d: got %d, want %d", i, got[i], want[i])
+		}
+	}
+}
+
+func TestJoinEmails(t *testing.T) {
+	tests := []struct {
+		emails []string
+		want   string
+	}{
+		{nil, ""},
+		{[]string{}, ""},
+		{[]string{"a@x.com"}, "a@x.com"},
+		{[]string{"a@x.com", "b@x.com"}, "a@x.com, and b@x.com"},
+		{[]string{"a@x.com", "b@x.com", "c@x.com"}, "a@x.com, b@x.com, and c@x.com"},
+	}
+	for _, tt := range tests {
+		got := joinEmails(tt.emails)
+		if got != tt.want {
+			t.Errorf("joinEmails(%v) = %q, want %q", tt.emails, got, tt.want)
+		}
+	}
+}
+
+func TestTimeRange(t *testing.T) {
+	frameStart := mustTime("2025-03-10T09:00:00Z")
+	frameEnd := mustTime("2025-03-10T17:00:00Z")
+
+	t.Run("uses_frame_when_both_set", func(t *testing.T) {
+		slots := []models.Availability{
+			{SlotStart: mustTime("2025-03-10T08:00:00Z"), SlotEnd: mustTime("2025-03-10T18:00:00Z")},
+		}
+		start, end := timeRange(slots, &frameStart, &frameEnd)
+		if !start.Equal(frameStart) || !end.Equal(frameEnd) {
+			t.Errorf("got [%v, %v], want [%v, %v]", start, end, frameStart, frameEnd)
+		}
+	})
+
+	t.Run("uses_slot_bounds_when_no_frame", func(t *testing.T) {
+		slots := []models.Availability{
+			{SlotStart: mustTime("2025-03-10T10:00:00Z"), SlotEnd: mustTime("2025-03-10T11:00:00Z")},
+			{SlotStart: mustTime("2025-03-10T14:00:00Z"), SlotEnd: mustTime("2025-03-10T15:00:00Z")},
+		}
+		start, end := timeRange(slots, nil, nil)
+		if !start.Equal(mustTime("2025-03-10T10:00:00Z")) || !end.Equal(mustTime("2025-03-10T15:00:00Z")) {
+			t.Errorf("got [%v, %v], want [10:00, 15:00]", start, end)
+		}
+	})
+
+	t.Run("partial_frame_clips", func(t *testing.T) {
+		slots := []models.Availability{
+			{SlotStart: mustTime("2025-03-10T08:00:00Z"), SlotEnd: mustTime("2025-03-10T18:00:00Z")},
+		}
+		start, end := timeRange(slots, &frameStart, nil)
+		if !start.Equal(frameStart) || !end.Equal(mustTime("2025-03-10T18:00:00Z")) {
+			t.Errorf("got [%v, %v]", start, end)
+		}
+	})
+}
+
 // Integration tests with in-memory DB
 func setupSchedulingDB(t *testing.T) *gorm.DB {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})

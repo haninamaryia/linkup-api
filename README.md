@@ -10,6 +10,8 @@ A Go API for scheduling meetings and finding the best time that works for everyo
 - **Invitations** — Share link by token: get event details (no auth), submit availability (optional email to mark participant as responded).
 - **Participant status** — Organizer sees who was invited, who has responded, and **each participant’s submitted slots** (who submitted which times).
 
+- **API contract** — OpenAPI 3.0 spec and interactive Swagger UI at `/docs` for testing, demos, and frontend integration.
+
 ## Prerequisites
 
 - Go 1.21+
@@ -47,6 +49,24 @@ Config is loaded with **viper**: defaults are set in `cmd/main.go`, optional fil
 
 ### Testing
 
+**Makefile (unit, integration, smoke, pre-commit)**
+
+| Target | Description |
+|--------|-------------|
+| `make test-unit` | Unit tests only (e.g. `./services/...`); pure logic, no DB/HTTP. |
+| `make test-integration` | Integration tests (`./http/api/...`); handlers + in-memory DB, **mocks only** (no external HTTP or email). |
+| `make test-smoke` | Smoke tests (**Dredd**) against a **live server**; set `BASE_URL` (default `http://localhost:8181`). Contracts in `docs/smoke-contracts.yaml`. Uses **npx** if available, else runs Dredd in Docker (no Node required). |
+| `make pre-commit` | Runs unit → integration → starts Docker container → Dredd smoke → stops container. |
+
+Smoke contracts are defined in **`docs/smoke-contracts.yaml`** (OpenAPI 3). Run Dredd manually: `npm install` then `npx dredd docs/smoke-contracts.yaml http://localhost:8181`. If you don't have Node, **`make test-smoke`** will run Dredd inside Docker (after starting the API with **`make docker-up`**).
+
+**Health contract (Docker/K8s)**
+
+| Endpoint | Contract |
+|----------|----------|
+| `GET /health` | 200, `{"status":"ok"}` — liveness (no dependencies checked). |
+| `GET /ready` | 200, `{"status":"ok"}` when DB is reachable; 503 otherwise — readiness. |
+
 **Automated tests**
 
 ```bash
@@ -82,7 +102,10 @@ Tests cover auth flow (codes in DB, verify via HTTP), CORS (allowed origin gets 
 
 ### API documentation
 
-See **`docs/api.md`** for endpoint list, request/response shapes, status codes, and edge-case summary.
+- **OpenAPI contract** — The API is described by an OpenAPI 3.0 spec. With the server running:
+  - **Interactive docs (Swagger UI):** [http://localhost:8181/docs](http://localhost:8181/docs) — try requests from the browser, authorize with a JWT from `/auth/verify-code`.
+  - **Raw spec:** [http://localhost:8181/openapi.yaml](http://localhost:8181/openapi.yaml) — for codegen, frontend types, or import into Postman/Insomnia.
+- **Markdown overview** — See **`docs/api.md`** for endpoint list, request/response shapes, status codes, and edge-case summary.
 
 ### Seed data (local dev)
 
@@ -95,6 +118,17 @@ go run ./cmd/seed --reset
 ```
 
 Uses `DATABASE_URL` (default `linkup.db`). Creates user `dev@localhost`, event "Seed Meeting", and share link `/inv/seed-invite-token-<id>`.
+
+### Docker
+
+```bash
+make docker-build    # Build image
+make docker-run      # Run in foreground (port 8181, DB in ./data)
+make docker-up       # Start in background (for smoke tests)
+make docker-down     # Stop and remove container
+```
+
+Smoke tests expect a running server: `make docker-up && make test-smoke && make docker-down`, or use `make pre-commit`.
 
 ## API overview
 

@@ -20,14 +20,14 @@ import (
 	"linkup-backend/utils"
 )
 
-func mustParseTime(s string) time.Time {
-	t, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		panic(err)
-	}
-	return t
-}
+// mockEmailSender implements services.EmailSender for integration tests. No external calls.
+type mockEmailSender struct{}
 
+func (m *mockEmailSender) SendInvite(to, eventTitle, organizerName, inviteLink string) error { return nil }
+func (m *mockEmailSender) SendReminder(to, eventTitle, inviteLink string) error               { return nil }
+func (m *mockEmailSender) SendConfirmationToOrganizer(to, eventTitle string) error            { return nil }
+
+// setupTestApp builds an app with in-memory SQLite and mocks only (no external HTTP or email).
 func setupTestApp(t *testing.T) (*fiber.App, *gorm.DB, *services.AuthService, string) {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -47,7 +47,7 @@ func setupTestApp(t *testing.T) (*fiber.App, *gorm.DB, *services.AuthService, st
 	schedulingService := services.NewSchedulingService(db)
 	participantService := services.NewParticipantService(db)
 	invitationService := services.NewInvitationService(db)
-	emailSender := services.NewStubEmailSender()
+	emailSender := &mockEmailSender{}
 
 	authHandler := NewAuthHandler(authService, jwtSecret)
 	eventsHandler := NewEventsHandler(db, jwtSecret, participantService, emailSender, schedulingService)
@@ -75,6 +75,14 @@ func setupTestApp(t *testing.T) (*fiber.App, *gorm.DB, *services.AuthService, st
 	app.Post("/inv/:token/availability", invHandler.SubmitAvailability)
 
 	return app, db, authService, jwtSecret
+}
+
+func mustParseTime(s string) time.Time {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		panic(err)
+	}
+	return t
 }
 
 func getJWT(t *testing.T, app *fiber.App, authService *services.AuthService) string {
@@ -818,6 +826,185 @@ func TestDeleteEvent_cascades(t *testing.T) {
 	db.Model(&models.Participant{}).Where("event_id = ?", eventID).Count(&partCount)
 	if partCount != 0 {
 		t.Fatalf("participants should be cascaded, got %d", partCount)
+	}
+}
+
+// --- API/integration tests (handlers + DB) ---
+
+// TestUpdateEvent_reversedTimeFrame_returns400 ensures PATCH with time_frame_end before time_frame_start returns 400.
+func TestUpdateEvent_reversedTimeFrame_returns400(t *testing.T) {
+	app, _, authService, _ := setupTestApp(t)
+	token := getJWT(t, app, authService)
+	eventID := createEvent(t, app, token, "Meet", 30, nil, nil)
+
+	patchBody, _ := json.Marshal(map[string]interface{}{
+		"time_frame_start": "2025-03-01T17:00:00Z",
+		"time_frame_end":   "2025-03-01T09:00:00Z",
+	})
+	req := httptest.NewRequest("PATCH", fmt.Sprintf("/events/%d", eventID), bytes.NewReader(patchBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, _ := app.Test(req)
+	if resp.StatusCode != 400 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 400 for reversed time frame on PATCH, got %d body=%s", resp.StatusCode, string(b))
+	}
+	var out map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&out)
+	if out["error"].(string) != "time_frame_end must be after time_frame_start" {
+		t.Fatalf("unexpected error: %v", out["error"])
+	}
+}
+
+// TestGetBestTimes_viaAPI_returnsRankedSlots exercises full flow via HTTP: create event, submit availability via invite for two participants with overlap, GET best-times, assert shape and counts.
+func TestGetBestTimes_viaAPI_returnsRankedSlots(t *testing.T) {
+	app, _, authService, _ := setupTestApp(t)
+	token := getJWT(t, app, authService)
+
+	createBody, _ := json.Marshal(map[string]interface{}{
+		"title":              "Meet",
+		"duration_minutes":    30,
+		"time_frame_start":   "2025-03-01T09:00:00Z",
+		"time_frame_end":     "2025-03-01T17:00:00Z",
+		"participant_emails": []string{"a@test.com", "b@test.com"},
+	})
+	req := httptest.NewRequest("POST", "/events", bytes.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, _ := app.Test(req)
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create event: %d %s", resp.StatusCode, string(b))
+	}
+	var createOut map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&createOut)
+	eventID := int(createOut["id"].(float64))
+	shareLink := createOut["share_link"].(string)
+	invToken := shareLink[len("/inv/"):]
+
+	// Participant A: 10:00-11:30
+	availA, _ := json.Marshal(map[string]string{
+		"email":      "a@test.com",
+		"slot_start": "2025-03-01T10:00:00Z",
+		"slot_end":   "2025-03-01T11:30:00Z",
+	})
+	reqA := httptest.NewRequest("POST", "/inv/"+invToken+"/availability", bytes.NewReader(availA))
+	reqA.Header.Set("Content-Type", "application/json")
+	respA, _ := app.Test(reqA)
+	if respA.StatusCode != 201 {
+		b, _ := io.ReadAll(respA.Body)
+		t.Fatalf("submit A: %d %s", respA.StatusCode, string(b))
+	}
+
+	// Participant B: 10:30-12:00 (overlap with A: 10:30-11:30)
+	availB, _ := json.Marshal(map[string]string{
+		"email":      "b@test.com",
+		"slot_start": "2025-03-01T10:30:00Z",
+		"slot_end":   "2025-03-01T12:00:00Z",
+	})
+	reqB := httptest.NewRequest("POST", "/inv/"+invToken+"/availability", bytes.NewReader(availB))
+	reqB.Header.Set("Content-Type", "application/json")
+	respB, _ := app.Test(reqB)
+	if respB.StatusCode != 201 {
+		b, _ := io.ReadAll(respB.Body)
+		t.Fatalf("submit B: %d %s", respB.StatusCode, string(b))
+	}
+
+	// GET best-times (no auth required)
+	getReq := httptest.NewRequest("GET", fmt.Sprintf("/events/%d/best-times", eventID), nil)
+	getResp, _ := app.Test(getReq)
+	if getResp.StatusCode != 200 {
+		b, _ := io.ReadAll(getResp.Body)
+		t.Fatalf("best-times: %d %s", getResp.StatusCode, string(b))
+	}
+	var bestOut map[string]interface{}
+	json.NewDecoder(getResp.Body).Decode(&bestOut)
+	bestTimes, ok := bestOut["best_times"].([]interface{})
+	if !ok || len(bestTimes) == 0 {
+		t.Fatalf("expected best_times array with at least one slot, got %v", bestOut["best_times"])
+	}
+	top := bestTimes[0].(map[string]interface{})
+	if top["available_count"].(float64) != 2 || top["total"].(float64) != 2 {
+		t.Errorf("top slot: available_count=%v total=%v, want 2/2", top["available_count"], top["total"])
+	}
+	if _, ok := top["slot_start"]; !ok {
+		t.Error("top slot missing slot_start")
+	}
+	if _, ok := top["slot_end"]; !ok {
+		t.Error("top slot missing slot_end")
+	}
+}
+
+// TestParticipantStatus_afterInviteSubmit asserts participant-status response after one participant submits via invite.
+func TestParticipantStatus_afterInviteSubmit(t *testing.T) {
+	app, _, authService, _ := setupTestApp(t)
+	token := getJWT(t, app, authService)
+
+	createBody, _ := json.Marshal(map[string]interface{}{
+		"title":              "Meet",
+		"duration_minutes":   30,
+		"participant_emails": []string{"responded@test.com", "pending@test.com"},
+	})
+	req := httptest.NewRequest("POST", "/events", bytes.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, _ := app.Test(req)
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create: %d %s", resp.StatusCode, string(b))
+	}
+	var createOut map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&createOut)
+	eventID := int(createOut["id"].(float64))
+	invToken := createOut["share_link"].(string)[len("/inv/"):]
+
+	// One participant submits via invite
+	availBody, _ := json.Marshal(map[string]string{
+		"email":      "responded@test.com",
+		"slot_start": "2025-03-01T10:00:00Z",
+		"slot_end":   "2025-03-01T11:00:00Z",
+	})
+	postReq := httptest.NewRequest("POST", "/inv/"+invToken+"/availability", bytes.NewReader(availBody))
+	postReq.Header.Set("Content-Type", "application/json")
+	app.Test(postReq)
+
+	// Organizer gets participant status
+	statusReq := httptest.NewRequest("GET", fmt.Sprintf("/events/%d/participant-status", eventID), nil)
+	statusReq.Header.Set("Authorization", "Bearer "+token)
+	statusResp, _ := app.Test(statusReq)
+	if statusResp.StatusCode != 200 {
+		b, _ := io.ReadAll(statusResp.Body)
+		t.Fatalf("participant-status: %d %s", statusResp.StatusCode, string(b))
+	}
+	var statusOut map[string]interface{}
+	json.NewDecoder(statusResp.Body).Decode(&statusOut)
+	if statusOut["responded_count"].(float64) != 1 {
+		t.Errorf("responded_count: got %v, want 1", statusOut["responded_count"])
+	}
+	if statusOut["total_count"].(float64) != 2 {
+		t.Errorf("total_count: got %v, want 2", statusOut["total_count"])
+	}
+	participants := statusOut["participants"].([]interface{})
+	if len(participants) != 2 {
+		t.Fatalf("participants length: got %d, want 2", len(participants))
+	}
+	var respondedFound bool
+	for _, p := range participants {
+		pm := p.(map[string]interface{})
+		if pm["email"].(string) == "responded@test.com" {
+			respondedFound = true
+			if !pm["responded"].(bool) {
+				t.Error("responded@test.com should have responded=true")
+			}
+			slots := pm["slots"].([]interface{})
+			if len(slots) != 1 {
+				t.Errorf("responded participant slots: got %d, want 1", len(slots))
+			}
+			break
+		}
+	}
+	if !respondedFound {
+		t.Fatal("responded@test.com not found in participants")
 	}
 }
 

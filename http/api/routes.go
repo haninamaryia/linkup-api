@@ -28,6 +28,10 @@ func SetupRoutes(app *fiber.App, db *gorm.DB, jwtSecret string, authCodeTTL time
 	eventsHandler := NewEventsHandler(db, jwtSecret, participantService, emailSender, schedulingService)
 	availHandler := NewAvailabilityHandler(db, schedulingService)
 	invHandler := NewInvitationHandler(invitationService, participantService, db)
+	healthHandler := NewHealthHandler(db)
+
+	app.Get("/health", healthHandler.Health)
+	app.Get("/ready", healthHandler.Ready)
 
 	app.Post("/auth/request-code", authHandler.RequestCode)
 	app.Post("/auth/verify-code", authHandler.VerifyCode)

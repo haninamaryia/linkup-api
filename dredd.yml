@@ -1,0 +1,19 @@
+# Dredd config for smoke contract tests.
+# Override endpoint: BASE_URL=http://localhost:8181 npx dredd
+# Or pass explicitly: npx dredd docs/smoke-contracts.yaml http://localhost:8181
+
+blueprint: docs/smoke-contracts.yaml
+endpoint: "http://localhost:8181"
+custom: {}
+dry-run: null
+hookfiles: null
+only: []
+output: []
+header: []
+sorted: false
+user: null
+inline-errors: false
+details: false
+method: []
+loglevel: warning
+path: []

@@ -1,0 +1,860 @@
+openapi: 3.0.3
+info:
+  title: Linkup API
+  description: |
+    Scheduling API for events with participant availability and best-time recommendations.
+    All error responses use `{"error": "<string>"}`.
+  version: 0.1.0
+  contact:
+    name: Linkup
+
+servers:
+  - url: http://localhost:8181
+    description: Local development
+
+tags:
+  - name: Auth
+    description: Magic-link style auth (request code, verify code, get JWT)
+  - name: Events
+    description: Organizer CRUD for events
+  - name: Availability
+    description: Submit availability and get best-time recommendations
+  - name: Invitations
+    description: Participant flow via share link (no JWT)
+  - name: Health
+    description: Liveness and readiness (Docker/K8s contract)
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness
+      description: Returns 200 and {"status":"ok"}. No dependencies checked.
+      operationId: health
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /ready:
+    get:
+      tags: [Health]
+      summary: Readiness
+      description: Returns 200 if the database is reachable, 503 otherwise.
+      operationId: ready
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Service unavailable (e.g. DB unreachable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /auth/request-code:
+    post:
+      tags: [Auth]
+      summary: Request verification code
+      description: Sends a one-time code to the email (logged in dev; configurable email in production). 429 if rate limited.
+      operationId: requestCode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequestCodeRequest'
+      responses:
+        '200':
+          description: Code sent (or logged in dev)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestCodeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          description: Too many code requests for this email; try again later
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/verify-code:
+    post:
+      tags: [Auth]
+      summary: Verify code and get JWT
+      description: Validates email + code. Returns JWT for Authorization header. Code is single-use; replay returns 401.
+      operationId: verifyCode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyCodeRequest'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifyCodeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Invalid or expired code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /events:
+    get:
+      tags: [Events]
+      summary: List organizer's events
+      operationId: listEvents
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of events (creator only)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EventResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [Events]
+      summary: Create event
+      description: Creates event, invitation (share link), and optional participants. time_frame_end must be after time_frame_start.
+      operationId: createEvent
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEventRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /events/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+        description: Event ID
+    get:
+      tags: [Events]
+      summary: Get event (public)
+      description: No auth required. Returns event and share_link.
+      operationId: getEvent
+      responses:
+        '200':
+          description: Event details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [Events]
+      summary: Update event (organizer only)
+      description: Partial update. participant_emails replaces the list; removed participants lose their availability. Duplicate emails deduped.
+      operationId: updateEvent
+      security:
+        - BearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateEventRequest'
+      responses:
+        '200':
+          description: Updated event
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Not event creator
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [Events]
+      summary: Delete event (organizer only)
+      description: Cascade deletes availabilities, participants, invitations.
+      operationId: deleteEvent
+      security:
+        - BearerAuth: []
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Not event creator
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /events/{id}/participant-status:
+    get:
+      tags: [Events]
+      summary: Get participant status (organizer only)
+      description: Participants with their submitted slots and response counts.
+      operationId: getParticipantStatus
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Participant status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParticipantStatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Not event creator
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /events/{id}/summary:
+    get:
+      tags: [Events]
+      summary: Get event summary (organizer only)
+      description: Event, participants with slots, top 1–3 best_times, counts.
+      operationId: getEventSummary
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Event summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventSummaryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Not event creator
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /events/{id}/availability:
+    post:
+      tags: [Availability]
+      summary: Submit availability (authenticated or anonymous)
+      description: Slot must be within event timeframe (if set) and length ≥ event duration. Optional JWT; user_id can link to user.
+      operationId: submitAvailability
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitAvailabilityRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmitAvailabilityResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /events/{id}/best-time:
+    get:
+      tags: [Availability]
+      summary: Get best time (single top slot)
+      operationId: getBestTime
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Top candidate slot(s) and optional note
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BestTimesResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /events/{id}/best-times:
+    get:
+      tags: [Availability]
+      summary: Get best times (ranked list)
+      description: All candidate slots; may include message, note, excluded_participant_ids when not everyone is available.
+      operationId: getBestTimes
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Ranked best times
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BestTimesResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /inv/{token}:
+    get:
+      tags: [Invitations]
+      summary: Get event by invitation token
+      description: For share link. 404 not found, 410 invitation expired.
+      operationId: getByToken
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Event details for participant view
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvEventResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: Invitation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '410':
+          description: Invitation has expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /inv/{token}/availability:
+    post:
+      tags: [Invitations]
+      summary: Submit availability via invite link
+      description: |
+        Single slot: slot_start + slot_end. Multiple: slots array (email required). With email, replaces that participant's slots.
+        Overlapping slots in one request rejected. 410 if invite expired.
+      operationId: submitInvAvailability
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InvSubmitAvailabilityRequest'
+      responses:
+        '201':
+          description: Submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvSubmitAvailabilityResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: Invitation or event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '410':
+          description: Invitation has expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT from POST /auth/verify-code
+
+  responses:
+    BadRequest:
+      description: Validation or invalid body
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing or invalid JWT
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: "title required"
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "ok"
+        error:
+          type: string
+          description: Present when status is unavailable (e.g. ready endpoint)
+
+    RequestCodeRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+    RequestCodeResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "verification code sent"
+
+    VerifyCodeRequest:
+      type: object
+      required: [email, code]
+      properties:
+        email:
+          type: string
+          format: email
+        code:
+          type: string
+    VerifyCodeResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: JWT for Authorization Bearer header
+
+    CreateEventRequest:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        location:
+          type: string
+        duration_minutes:
+          type: integer
+          default: 60
+        time_frame_start:
+          type: string
+          format: date-time
+          description: RFC3339; must be before time_frame_end
+        time_frame_end:
+          type: string
+          format: date-time
+          description: RFC3339; must be after time_frame_start
+        participant_emails:
+          type: array
+          items:
+            type: string
+            format: email
+
+    UpdateEventRequest:
+      type: object
+      description: All fields optional; participant_emails replaces the list
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        location:
+          type: string
+        duration_minutes:
+          type: integer
+        time_frame_start:
+          type: string
+          format: date-time
+        time_frame_end:
+          type: string
+          format: date-time
+        participant_emails:
+          type: array
+          items:
+            type: string
+            format: email
+
+    EventResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        creator_id:
+          type: integer
+          format: int64
+        title:
+          type: string
+        description:
+          type: string
+        location:
+          type: string
+        duration_minutes:
+          type: integer
+        time_frame_start:
+          type: string
+          format: date-time
+          nullable: true
+        time_frame_end:
+          type: string
+          format: date-time
+          nullable: true
+        share_link:
+          type: string
+          example: "/inv/abc123..."
+        created_at:
+          type: string
+          format: date-time
+
+    ParticipantStatusResponse:
+      type: object
+      properties:
+        participants:
+          type: array
+          items:
+            $ref: '#/components/schemas/ParticipantWithSlots'
+        responded_count:
+          type: integer
+        total_count:
+          type: integer
+        percent_responded:
+          type: integer
+
+    ParticipantWithSlots:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        email:
+          type: string
+        responded:
+          type: boolean
+        responded_at:
+          type: string
+          format: date-time
+          nullable: true
+        slots:
+          type: array
+          items:
+            $ref: '#/components/schemas/SlotInfo'
+
+    SlotInfo:
+      type: object
+      properties:
+        slot_start:
+          type: string
+          format: date-time
+        slot_end:
+          type: string
+          format: date-time
+
+    EventSummaryResponse:
+      type: object
+      properties:
+        event:
+          $ref: '#/components/schemas/EventResponse'
+        participants:
+          type: array
+          items:
+            $ref: '#/components/schemas/ParticipantWithSlots'
+        responded_count:
+          type: integer
+        total_count:
+          type: integer
+        percent_responded:
+          type: integer
+        best_times:
+          type: array
+          items:
+            $ref: '#/components/schemas/BestTimeSlot'
+        note:
+          type: string
+        excluded_participant_ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+
+    BestTimeSlot:
+      type: object
+      properties:
+        slot_start:
+          type: string
+          format: date-time
+        slot_end:
+          type: string
+          format: date-time
+        available_count:
+          type: integer
+        total:
+          type: integer
+
+    BestTimesResponse:
+      type: object
+      properties:
+        best_times:
+          type: array
+          items:
+            $ref: '#/components/schemas/BestTimeSlot'
+        message:
+          type: string
+          example: "no overlapping availability found"
+        note:
+          type: string
+        excluded_participant_ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+
+    SubmitAvailabilityRequest:
+      type: object
+      required: [slot_start, slot_end]
+      properties:
+        slot_start:
+          type: string
+          format: date-time
+        slot_end:
+          type: string
+          format: date-time
+        user_id:
+          type: integer
+          format: int64
+          nullable: true
+
+    SubmitAvailabilityResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        event_id:
+          type: integer
+          format: int64
+        slot_start:
+          type: string
+          format: date-time
+        slot_end:
+          type: string
+          format: date-time
+
+    InvEventResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        title:
+          type: string
+        description:
+          type: string
+        location:
+          type: string
+        duration_minutes:
+          type: integer
+        time_frame_start:
+          type: string
+          format: date-time
+          nullable: true
+        time_frame_end:
+          type: string
+          format: date-time
+          nullable: true
+        organizer_name:
+          type: string
+
+    InvSlot:
+      type: object
+      required: [slot_start, slot_end]
+      properties:
+        slot_start:
+          type: string
+          format: date-time
+        slot_end:
+          type: string
+          format: date-time
+
+    InvSubmitAvailabilityRequest:
+      type: object
+      description: Either (slot_start + slot_end) or slots array. Email required for slots array.
+      properties:
+        email:
+          type: string
+          format: email
+        slot_start:
+          type: string
+          format: date-time
+        slot_end:
+          type: string
+          format: date-time
+        slots:
+          type: array
+          items:
+            $ref: '#/components/schemas/InvSlot'
+
+    InvSubmitAvailabilityResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "availability submitted"
+        id:
+          type: integer
+          format: int64
+          description: Present when exactly one slot created
+        ids:
+          type: array
+          items:
+            type: integer
+          description: Present when multiple slots created

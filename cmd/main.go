@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/viper"
 	"linkup-backend/config"
 	"linkup-backend/database"
+	"linkup-backend/docs"
 	"linkup-backend/http/api"
 	"linkup-backend/services"
 )
@@ -43,6 +44,35 @@ const (
 	defaultConfigPath  = "cmd"
 	configPathEnvVar  = "CONFIG_PATH"
 )
+
+// swaggerUIHTML is the Swagger UI page that loads the OpenAPI spec from /openapi.yaml.
+const swaggerUIHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Linkup API</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
+  <script>
+    window.onload = function() {
+      window.ui = SwaggerUIBundle({
+        url: "/openapi.yaml",
+        dom_id: "#swagger-ui",
+        presets: [
+          SwaggerUIBundle.presets.apis,
+          SwaggerUIStandalonePreset
+        ],
+        layout: "StandaloneLayout"
+      });
+    };
+  </script>
+</body>
+</html>
+`
 
 // loadConfig creates a viper config with defaults, optional config file (cmd/config.yml), and env overrides.
 func loadConfig() *viper.Viper {
@@ -113,6 +143,16 @@ func main() {
 	// When email.provider is set to a non-stub value, swap for production sender (Resend, etc.)
 
 	api.SetupRoutes(app, db, cfg.JwtSecret, authCodeTTL, rateLimitMax, rateLimitWindow, emailSender)
+
+	// API contract: OpenAPI spec and interactive docs (Swagger UI)
+	app.Get("/openapi.yaml", func(c *fiber.Ctx) error {
+		c.Set("Content-Type", "application/x-yaml")
+		return c.Send(docs.OpenAPIYAML)
+	})
+	app.Get("/docs", func(c *fiber.Ctx) error {
+		c.Set("Content-Type", "text/html; charset=utf-8")
+		return c.SendString(swaggerUIHTML)
+	})
 
 	log.Println("API running on", cfg.ServerAddress)
 	if err := app.Listen(cfg.ServerAddress); err != nil {

@@ -1,0 +1,11 @@
+{
+  "name": "linkup-api",
+  "private": true,
+  "description": "Smoke/contract tests via Dredd (see Makefile test-smoke)",
+  "scripts": {
+    "dredd": "dredd"
+  },
+  "devDependencies": {
+    "dredd": "^16.0.0"
+  }
+}
