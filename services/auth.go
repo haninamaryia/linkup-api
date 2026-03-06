@@ -4,39 +4,44 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"sync"
+	"time"
 
 	"gorm.io/gorm"
 
 	"linkup-backend/models"
 )
 
+const defaultCodeTTL = 10 * time.Minute
+
 // AuthService handles email+code auth (no passwords). RequestCode creates/finds user and stores
-// a one-time code in memory. VerifyCode checks the code and returns userID+email for JWT issuance.
+// a one-time code in the database with TTL. VerifyCode checks the code, deletes it, and returns userID+email.
 type AuthService struct {
 	db         *gorm.DB
 	jwtSecret  string
-	codeStore  map[string]verificationEntry
-	codeStoreMu sync.RWMutex
+	codeTTL    time.Duration
+	rateLimiter AuthCodeRateLimiter // optional; if set, RequestCode checks before creating code
 }
 
-// TODO: Persist verification codes in DB or Redis for multi-instance and restart resilience.
-type verificationEntry struct {
-	UserID uint
-	Email  string
-}
-
-func NewAuthService(db *gorm.DB, jwtSecret string) *AuthService {
+func NewAuthService(db *gorm.DB, jwtSecret string, codeTTL time.Duration) *AuthService {
+	if codeTTL <= 0 {
+		codeTTL = defaultCodeTTL
+	}
 	return &AuthService{
 		db:        db,
 		jwtSecret: jwtSecret,
-		codeStore: make(map[string]verificationEntry),
+		codeTTL:   codeTTL,
 	}
 }
 
-// RequestCode finds or creates user, generates one-time code, stores in memory, returns code.
-// Handlers call VerifyCode with the code; handler then generates JWT.
+// SetRateLimiter sets an optional rate limiter for RequestCode (per-email).
+func (s *AuthService) SetRateLimiter(r AuthCodeRateLimiter) {
+	s.rateLimiter = r
+}
+
 func (s *AuthService) RequestCode(email, name string) (string, error) {
+	if s.rateLimiter != nil && !s.rateLimiter.Allow(email) {
+		return "", ErrRateLimited
+	}
 	var user models.User
 	err := s.db.Where("email = ?", email).First(&user).Error
 	if err == gorm.ErrRecordNotFound {
@@ -49,30 +54,50 @@ func (s *AuthService) RequestCode(email, name string) (string, error) {
 	}
 
 	code := generateCode()
-	s.codeStoreMu.Lock()
-	s.codeStore[code] = verificationEntry{UserID: user.ID, Email: user.Email}
-	s.codeStoreMu.Unlock()
+	expiresAt := time.Now().Add(s.codeTTL)
+	row := models.AuthCode{
+		Code:      code,
+		Email:     user.Email,
+		UserID:    user.ID,
+		ExpiresAt: expiresAt,
+	}
+	if err := s.db.Create(&row).Error; err != nil {
+		return "", err
+	}
 
-	// TODO: Send email. For now, log the code for development.
+	// Opportunistic cleanup of expired codes to keep table small
+	go s.cleanupExpiredCodes()
+
 	fmt.Printf("[DEV] Verification code for %s: %s\n", email, code)
 	return code, nil
 }
 
-// VerifyCode validates email+code, deletes code from store, returns userID and email.
+// VerifyCode validates email+code, deletes code from DB, returns userID and email.
 func (s *AuthService) VerifyCode(email, code string) (uint, string, error) {
-	s.codeStoreMu.RLock()
-	entry, ok := s.codeStore[code]
-	s.codeStoreMu.RUnlock()
-
-	if !ok || entry.Email != email {
+	var row models.AuthCode
+	err := s.db.Where("code = ? AND email = ?", code, email).First(&row).Error
+	if err == gorm.ErrRecordNotFound {
+		return 0, "", ErrInvalidCode
+	}
+	if err != nil {
+		return 0, "", err
+	}
+	if time.Now().After(row.ExpiresAt) {
+		_ = s.db.Delete(&row).Error
 		return 0, "", ErrInvalidCode
 	}
 
-	s.codeStoreMu.Lock()
-	delete(s.codeStore, code)
-	s.codeStoreMu.Unlock()
+	if err := s.db.Delete(&row).Error; err != nil {
+		return 0, "", err
+	}
+	// Cleanup expired codes when we're already in DB
+	s.cleanupExpiredCodes()
 
-	return entry.UserID, entry.Email, nil
+	return row.UserID, row.Email, nil
+}
+
+func (s *AuthService) cleanupExpiredCodes() {
+	s.db.Where("expires_at < ?", time.Now()).Delete(&models.AuthCode{})
 }
 
 func generateCode() string {

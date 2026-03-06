@@ -38,15 +38,18 @@ type InvEventResponse struct {
 func (h *InvitationHandler) GetByToken(c *fiber.Ctx) error {
 	token := c.Params("token")
 	if token == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "token required"})
+		return respondError(c, fiber.StatusBadRequest, "token required")
 	}
 
 	event, creator, err := h.invService.GetEventByToken(token)
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "invitation not found"})
+			return respondError(c, fiber.StatusNotFound, "invitation not found")
 		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		if err == services.ErrInvitationExpired {
+			return respondError(c, fiber.StatusGone, "invitation has expired")
+		}
+		return respondError(c, fiber.StatusInternalServerError, err.Error())
 	}
 
 	resp := InvEventResponse{
@@ -86,59 +89,90 @@ type InvSlot struct {
 func (h *InvitationHandler) SubmitAvailability(c *fiber.Ctx) error {
 	token := c.Params("token")
 	if token == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "token required"})
+		return respondError(c, fiber.StatusBadRequest, "token required")
 	}
 
 	eventID, err := h.invService.GetEventIDByToken(token)
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "invitation not found"})
+			return respondError(c, fiber.StatusNotFound, "invitation not found")
 		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		if err == services.ErrInvitationExpired {
+			return respondError(c, fiber.StatusGone, "invitation has expired")
+		}
+		return respondError(c, fiber.StatusInternalServerError, err.Error())
+	}
+
+	var event models.Event
+	if err := h.db.First(&event, eventID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return respondError(c, fiber.StatusNotFound, "event not found")
+		}
+		return respondError(c, fiber.StatusInternalServerError, err.Error())
 	}
 
 	var req InvSubmitAvailabilityRequest
 	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+		return respondError(c, fiber.StatusBadRequest, "invalid request")
 	}
 
 	// Decide payload: slots array vs single slot
 	var toInsert []struct{ start, end string }
 	if len(req.Slots) > 0 {
 		if req.Email == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "email required when using slots array"})
+			return respondError(c, fiber.StatusBadRequest, "email required when using slots array")
 		}
 		for i, s := range req.Slots {
 			if s.SlotStart == "" || s.SlotEnd == "" {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "slot_start and slot_end required in each slot"})
+				return respondError(c, fiber.StatusBadRequest, "slot_start and slot_end required in each slot")
 			}
 			start, err := parseISO8601(s.SlotStart)
 			if err != nil {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("invalid slot_start in slot %d", i+1)})
+				return respondError(c, fiber.StatusBadRequest, fmt.Sprintf("slot %d: slot_start must be a valid RFC3339 date-time", i+1))
 			}
 			end, err := parseISO8601(s.SlotEnd)
 			if err != nil {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("invalid slot_end in slot %d", i+1)})
+				return respondError(c, fiber.StatusBadRequest, fmt.Sprintf("slot %d: slot_end must be a valid RFC3339 date-time", i+1))
 			}
 			if !end.After(start) {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("slot_end must be after slot_start in slot %d", i+1)})
+				return respondError(c, fiber.StatusBadRequest, fmt.Sprintf("slot %d: slot_end must be after slot_start", i+1))
+			}
+			if err := validateSlotInEventTimeFrame(&event, start, end); err != nil {
+				return respondError(c, fiber.StatusBadRequest, fmt.Sprintf("slot %d: %s", i+1, err.Error()))
+			}
+			if err := validateSlotDuration(start, end, event.DurationMinutes); err != nil {
+				return respondError(c, fiber.StatusBadRequest, fmt.Sprintf("slot %d: %s", i+1, err.Error()))
+			}
+			// Reject overlapping slots within the same request
+			for j := 0; j < i; j++ {
+				prevStart, _ := parseISO8601(req.Slots[j].SlotStart)
+				prevEnd, _ := parseISO8601(req.Slots[j].SlotEnd)
+				if slotsOverlap(start, end, prevStart, prevEnd) {
+					return respondError(c, fiber.StatusBadRequest, fmt.Sprintf("slot %d overlaps slot %d", i+1, j+1))
+				}
 			}
 			toInsert = append(toInsert, struct{ start, end string }{s.SlotStart, s.SlotEnd})
 		}
 	} else {
 		if req.SlotStart == "" || req.SlotEnd == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "slot_start and slot_end required"})
+			return respondError(c, fiber.StatusBadRequest, "slot_start and slot_end required")
 		}
 		slotStart, err := parseISO8601(req.SlotStart)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid slot_start format"})
+			return respondError(c, fiber.StatusBadRequest, "slot_start must be a valid RFC3339 date-time (e.g. 2006-01-02T15:04:05Z)")
 		}
 		slotEnd, err := parseISO8601(req.SlotEnd)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid slot_end format"})
+			return respondError(c, fiber.StatusBadRequest, "slot_end must be a valid RFC3339 date-time (e.g. 2006-01-02T15:04:05Z)")
 		}
 		if !slotEnd.After(slotStart) {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "slot_end must be after slot_start"})
+			return respondError(c, fiber.StatusBadRequest, "slot_end must be after slot_start")
+		}
+		if err := validateSlotInEventTimeFrame(&event, slotStart, slotEnd); err != nil {
+			return respondError(c, fiber.StatusBadRequest, err.Error())
+		}
+		if err := validateSlotDuration(slotStart, slotEnd, event.DurationMinutes); err != nil {
+			return respondError(c, fiber.StatusBadRequest, err.Error())
 		}
 		toInsert = append(toInsert, struct{ start, end string }{req.SlotStart, req.SlotEnd})
 	}
@@ -165,7 +199,7 @@ func (h *InvitationHandler) SubmitAvailability(c *fiber.Ctx) error {
 			SlotEnd:       end,
 		}
 		if err := h.db.Create(&avail).Error; err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			return respondError(c, fiber.StatusInternalServerError, err.Error())
 		}
 		created = append(created, avail.ID)
 	}

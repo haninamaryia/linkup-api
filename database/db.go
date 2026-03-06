@@ -24,6 +24,7 @@ func Connect(cfg DBConfig) *gorm.DB {
 
 	db.AutoMigrate(
 		&models.User{},
+		&models.AuthCode{},
 		&models.Event{},
 		&models.Availability{},
 		&models.Invitation{},

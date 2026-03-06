@@ -1,7 +1,8 @@
-// Package api contains HTTP handlers for the Linkup API.
 package api
 
 import (
+	"time"
+
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
 
@@ -9,18 +10,19 @@ import (
 )
 
 // SetupRoutes wires all API routes to handlers.
-// Creates services (auth, scheduling, participants, invitations, email stub), then registers:
-// - Auth: request-code, verify-code
-// - Events: CRUD, participant-status
-// - Availability: submit, best-time, best-times
-// - Invitations: GET by token, POST availability (participant flow, no auth)
-func SetupRoutes(app *fiber.App, db *gorm.DB, jwtSecret string) {
-	authService := services.NewAuthService(db, jwtSecret)
+// authCodeRateLimitMax: max code requests per email per window (0 = no limit). authCodeRateLimitWindow: e.g. 15m.
+// emailSender: use stub for dev; pass production sender from main when configured.
+func SetupRoutes(app *fiber.App, db *gorm.DB, jwtSecret string, authCodeTTL time.Duration, authCodeRateLimitMax int, authCodeRateLimitWindow time.Duration, emailSender services.EmailSender) {
+	authService := services.NewAuthService(db, jwtSecret, authCodeTTL)
+	if authCodeRateLimitMax > 0 && authCodeRateLimitWindow > 0 {
+		authService.SetRateLimiter(services.NewAuthCodeRateLimiter(authCodeRateLimitMax, authCodeRateLimitWindow))
+	}
 	schedulingService := services.NewSchedulingService(db)
 	participantService := services.NewParticipantService(db)
 	invitationService := services.NewInvitationService(db)
-	// TODO: Swap for real email provider (Resend, SendGrid) when ready
-	emailSender := services.NewStubEmailSender()
+	if emailSender == nil {
+		emailSender = services.NewStubEmailSender()
+	}
 
 	authHandler := NewAuthHandler(authService, jwtSecret)
 	eventsHandler := NewEventsHandler(db, jwtSecret, participantService, emailSender, schedulingService)

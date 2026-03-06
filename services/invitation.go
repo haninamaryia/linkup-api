@@ -1,6 +1,8 @@
 package services
 
 import (
+	"time"
+
 	"gorm.io/gorm"
 
 	"linkup-backend/models"
@@ -20,6 +22,9 @@ func (s *InvitationService) GetEventByToken(token string) (*models.Event, *model
 	if err := s.db.Where("token = ?", token).First(&inv).Error; err != nil {
 		return nil, nil, err
 	}
+	if inv.ExpiresAt != nil && time.Now().After(*inv.ExpiresAt) {
+		return nil, nil, ErrInvitationExpired
+	}
 	var event models.Event
 	if err := s.db.First(&event, inv.EventID).Error; err != nil {
 		return nil, nil, err
@@ -35,6 +40,9 @@ func (s *InvitationService) GetEventIDByToken(token string) (uint, error) {
 	var inv models.Invitation
 	if err := s.db.Where("token = ?", token).First(&inv).Error; err != nil {
 		return 0, err
+	}
+	if inv.ExpiresAt != nil && time.Now().After(*inv.ExpiresAt) {
+		return 0, ErrInvitationExpired
 	}
 	return inv.EventID, nil
 }

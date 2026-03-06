@@ -32,15 +32,18 @@ type RequestCodeResponse struct {
 func (h *AuthHandler) RequestCode(c *fiber.Ctx) error {
 	var req RequestCodeRequest
 	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+		return respondError(c, fiber.StatusBadRequest, "invalid request")
 	}
 	if req.Email == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "email required"})
+		return respondError(c, fiber.StatusBadRequest, "email required")
 	}
 
 	_, err := h.authService.RequestCode(req.Email, req.Name)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		if err == services.ErrRateLimited {
+			return respondError(c, fiber.StatusTooManyRequests, "too many code requests; try again later")
+		}
+		return respondError(c, fiber.StatusInternalServerError, err.Error())
 	}
 
 	return c.JSON(RequestCodeResponse{Message: "verification code sent"})
@@ -59,23 +62,23 @@ type VerifyCodeResponse struct {
 func (h *AuthHandler) VerifyCode(c *fiber.Ctx) error {
 	var req VerifyCodeRequest
 	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+		return respondError(c, fiber.StatusBadRequest, "invalid request")
 	}
 	if req.Email == "" || req.Code == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "email and code required"})
+		return respondError(c, fiber.StatusBadRequest, "email and code required")
 	}
 
 	userID, email, err := h.authService.VerifyCode(req.Email, req.Code)
 	if err != nil {
 		if err == services.ErrInvalidCode {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid or expired code"})
+			return respondError(c, fiber.StatusUnauthorized, "invalid or expired code")
 		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return respondError(c, fiber.StatusInternalServerError, err.Error())
 	}
 
 	token, err := utils.GenerateToken(userID, email, h.jwtSecret)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to generate token"})
+		return respondError(c, fiber.StatusInternalServerError, "failed to generate token")
 	}
 
 	return c.JSON(VerifyCodeResponse{Token: token})
